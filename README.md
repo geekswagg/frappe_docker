@@ -1,7 +1,7 @@
-[![Build Stable](https://github.com/frappe/frappe_docker/actions/workflows/build_stable.yml/badge.svg)](https://github.com/frappe/frappe_docker/actions/workflows/build_stable.yml)
-[![Build Develop](https://github.com/frappe/frappe_docker/actions/workflows/build_develop.yml/badge.svg)](https://github.com/frappe/frappe_docker/actions/workflows/build_develop.yml)
+[![Build Stable](https://github.com/geekswagg/frappe_docker/actions/workflows/build_stable.yml/badge.svg)](https://github.com/geekswagg/frappe_docker/actions/workflows/build_stable.yml)
+[![Build Develop](https://github.com/geekswagg/frappe_docker/actions/workflows/build_develop.yml/badge.svg)](https://github.com/geekswagg/frappe_docker/actions/workflows/build_develop.yml)
 
-Everything about [Frappe](https://github.com/frappe/frappe) and [ERPNext](https://github.com/frappe/erpnext) in containers.
+Everything about [Frappe](https://github.com/geekswagg/frappe) and [ERPNext](https://github.com/geekswagg/erpnext) in custom, Centauri-maintained containers.
 
 # Getting Started
 
@@ -13,7 +13,7 @@ Once completed, chose one of the following two sections for next steps.
 
 To play in an already set up sandbox, in your browser, click the button below:
 
-<a href="https://labs.play-with-docker.com/?stack=https://raw.githubusercontent.com/frappe/frappe_docker/main/pwd.yml">
+<a href="https://labs.play-with-docker.com/?stack=https://raw.githubusercontent.com/geekswagg/frappe_docker/main/pwd.yml">
   <img src="https://raw.githubusercontent.com/play-with-docker/stacks/master/assets/images/button.png" alt="Try in PWD"/>
 </a>
 
@@ -22,7 +22,7 @@ To play in an already set up sandbox, in your browser, click the button below:
 First clone the repo:
 
 ```sh
-git clone https://github.com/frappe/frappe_docker
+git clone https://github.com/geekswagg/frappe_docker
 cd frappe_docker
 ```
 

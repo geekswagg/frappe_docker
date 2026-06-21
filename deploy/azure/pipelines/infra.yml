@@ -1,0 +1,86 @@
+# Provisioning pipeline (Phase 0 + data tier): deploys the Azure footprint via Bicep.
+#
+# Runs under the reused ARM service connection `centauri-development-subscription`
+# (subscription 4729e600…, Centauri tenant). Idempotent: re-running updates in place.
+#
+# Required pipeline variables (Pipelines > Library, variable group `erpnext-infra`):
+#   MYSQL_ADMIN_PASSWORD   (secret)  - strong password for the MySQL admin
+#   KV_ADMIN_OBJECT_ID               - AAD objectId to grant Key Vault admin
+#                                      (Collins in Centauri tenant: 3b2c80c3-e0ad-4456-a13f-3ba41d90cbd8)
+#
+# Manual trigger only — infra changes should be deliberate.
+
+trigger: none
+pr: none
+
+parameters:
+  - name: env
+    type: string
+    default: prod
+  - name: location
+    type: string
+    default: westeurope
+  - name: aksNodeCount
+    type: number
+    default: 1
+
+variables:
+  - group: erpnext-infra
+  - name: azureSubscription
+    value: "centauri-development-subscription"
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Validate
+    jobs:
+      - job: whatif
+        displayName: "Bicep what-if"
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az deployment sub what-if \
+                  --location ${{ parameters.location }} \
+                  --template-file deploy/azure/infra/main.bicep \
+                  --parameters env=${{ parameters.env }} \
+                               location=${{ parameters.location }} \
+                               aksNodeCount=${{ parameters.aksNodeCount }} \
+                               mysqlAdminPassword="$(MYSQL_ADMIN_PASSWORD)" \
+                               kvAdminObjectId="$(KV_ADMIN_OBJECT_ID)"
+
+  - stage: Deploy
+    dependsOn: Validate
+    jobs:
+      - deployment: provision
+        displayName: "Provision Azure resources"
+        environment: erpnext-${{ parameters.env }}   # add approvals here for prod gating
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      az deployment sub create \
+                        --name "erpnext-${{ parameters.env }}-$(Build.BuildId)" \
+                        --location ${{ parameters.location }} \
+                        --template-file deploy/azure/infra/main.bicep \
+                        --parameters env=${{ parameters.env }} \
+                                     location=${{ parameters.location }} \
+                                     aksNodeCount=${{ parameters.aksNodeCount }} \
+                                     mysqlAdminPassword="$(MYSQL_ADMIN_PASSWORD)" \
+                                     kvAdminObjectId="$(KV_ADMIN_OBJECT_ID)" \
+                        --query properties.outputs -o json | tee deployment-outputs.json
+                - publish: deployment-outputs.json
+                  artifact: infra-outputs

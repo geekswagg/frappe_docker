@@ -1,0 +1,105 @@
+# Azure DevOps pipeline: build the custom Frappe/ERPNext image and push to ACR.
+#
+# Builds images/custom/Containerfile via Docker Buildx, layering apps defined in
+# an apps.json (passed as APPS_JSON_BASE64). With an empty apps.json it builds a
+# plain frappe+erpnext image.
+#
+# Prerequisites (create these in ADO before the first run — see Phase 0, #3648):
+#   - Service connection (Azure Resource Manager, workload-identity federation)
+#     named by the `azureSubscription` variable below, with AcrPush on the registry.
+#   - Variable group `frappe-build` (Pipelines > Library) containing:
+#       ACR_NAME            e.g. comwengaacr   (the registry name, no .azurecr.io)
+#       APPS_JSON_BASE64    base64 of your apps.json (optional; omit for stock erpnext)
+#   - An Azure Container Registry.
+#
+# Pin FRAPPE_VERSION / ERPNEXT_VERSION to a release tag for production
+# (e.g. version-15). `develop` tracks the bleeding edge — do not ship it.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - docs/**
+      - "**/*.md"
+
+pr: none
+
+variables:
+  - group: frappe-build
+  - name: azureSubscription
+    value: "cloudextend.gauntlet.production"   # reused ARM service connection (sub 4729e600…)
+  - name: imageRepo
+    value: "erpnext-custom"
+  - name: FRAPPE_VERSION
+    value: "version-15"
+  - name: ERPNEXT_VERSION
+    value: "version-15"
+  - name: PYTHON_VERSION
+    value: "3.11.9"
+  - name: NODE_VERSION
+    value: "20.19.2"
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+
+  - script: |
+      set -euo pipefail
+      docker buildx create --use --name frappebuilder || docker buildx use frappebuilder
+      docker buildx inspect --bootstrap
+    displayName: "Set up Docker Buildx"
+
+  - task: AzureCLI@2
+    displayName: "ACR login"
+    inputs:
+      azureSubscription: $(azureSubscription)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        az acr login --name "$(ACR_NAME)"
+
+  - script: |
+      set -euo pipefail
+      # apps.json: from variable if provided, else a default frappe+erpnext set.
+      if [ -n "${APPS_JSON_BASE64:-}" ]; then
+        echo "$APPS_JSON_BASE64" | base64 -d > apps.json
+      else
+        cat > apps.json <<'JSON'
+        [
+          { "url": "https://github.com/frappe/erpnext", "branch": "version-15" }
+        ]
+        JSON
+      fi
+      echo "apps.json:" && cat apps.json
+    displayName: "Render apps.json"
+    env:
+      APPS_JSON_BASE64: $(APPS_JSON_BASE64)
+
+  - script: |
+      set -euo pipefail
+      REGISTRY="$(ACR_NAME).azurecr.io"
+      IMAGE="$REGISTRY/$(imageRepo)"
+      docker buildx build \
+        --file images/custom/Containerfile \
+        --build-arg FRAPPE_PATH=https://github.com/frappe/frappe \
+        --build-arg FRAPPE_BRANCH=$(FRAPPE_VERSION) \
+        --build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
+        --build-arg NODE_VERSION=$(NODE_VERSION) \
+        --secret id=apps_json,src=apps.json \
+        --tag "$IMAGE:$(Build.BuildId)" \
+        --tag "$IMAGE:$(ERPNEXT_VERSION)" \
+        --tag "$IMAGE:latest" \
+        --cache-from "type=registry,ref=$IMAGE:buildcache" \
+        --cache-to "type=registry,ref=$IMAGE:buildcache,mode=max" \
+        --push \
+        .
+    displayName: "Build & push custom image to ACR"
+
+  - script: echo "Pushed $(ACR_NAME).azurecr.io/$(imageRepo):$(Build.BuildId)"
+    displayName: "Summary"

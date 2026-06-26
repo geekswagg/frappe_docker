@@ -306,10 +306,13 @@ docker compose -p centauri exec backend \
 
 ### 3.9 WSL2 Auto-start for the ERPNext Stack
 
-Add to `/etc/rc.local` inside WSL2 (created if missing):
+WSL2 supports a `[boot]` hook in `/etc/wsl.conf` that runs a command automatically every time
+the WSL2 instance starts — no systemd, no rc-local service, no Task Scheduler update needed.
+
+**Step 1 — Create the startup script (run inside WSL2):**
 
 ```bash
-sudo tee /etc/rc.local > /dev/null << 'EOF'
+sudo tee /opt/centauri/start-erpnext.sh > /dev/null << 'EOF'
 #!/bin/bash
 cd /opt/centauri/frappe_docker
 docker compose \
@@ -321,16 +324,37 @@ docker compose \
   -f overrides/compose.mariadb-replication.yaml \
   --env-file .env \
   -p centauri \
-  up -d
-exit 0
+  up -d >> /var/log/centauri-start.log 2>&1
 EOF
-sudo chmod +x /etc/rc.local
+sudo chmod +x /opt/centauri/start-erpnext.sh
 ```
 
-Update the Task Scheduler action (step 3.4) to also run rc.local:
-```powershell
-$action = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-u root bash /etc/rc.local"
+**Step 2 — Register it as the WSL2 boot command (run inside WSL2):**
+
+```bash
+sudo tee /etc/wsl.conf > /dev/null << 'EOF'
+[boot]
+command = /opt/centauri/start-erpnext.sh
+
+[user]
+default = collins
+EOF
 ```
+
+> **Note:** Replace `collins` with your actual WSL2 username if different.
+> Run `whoami` inside WSL2 to confirm.
+
+**Step 3 — Test it (run in Windows PowerShell, NOT in WSL2):**
+
+```powershell
+wsl --shutdown
+Start-Sleep -Seconds 5
+wsl -- docker compose -p centauri ps
+```
+
+You should see all containers listed as `running` after WSL2 restarts. The Task Scheduler
+entry from step 3.4 ensures WSL2 itself starts on Windows boot; the `wsl.conf` boot command
+then starts the ERPNext stack inside it automatically.
 
 ### 3.10 Create Replication User
 

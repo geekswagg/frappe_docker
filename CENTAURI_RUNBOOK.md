@@ -1,8 +1,14 @@
 # Centauri ERPNext Adoption Runbook
 
 **Stack:** ERPNext v16.25.0 · Frappe v16 · MariaDB 11.8 · Redis 8.6  
-**Target:** Ubuntu Desktop 26.04 LTS (primary) + Azure (failover)  
-**Pattern:** API-heavy integrations with hot-standby failover
+**Primary:** Windows Desktop (WSL2 + Docker Engine) behind MikroTik RouterOS 7  
+**Failover:** Azure VM (hot-standby, deallocated when not needed)  
+**Pattern:** API-heavy integrations with WireGuard-tunnelled replication and Netwatch-driven failover
+
+> **Platform decision (updated):** The Windows Desktop replaces the Ubuntu laptop as the recommended
+> primary node. A desktop has no sleep/hibernate risk, RouterOS 7 provides native WireGuard for the
+> secure replication tunnel to Azure, and MikroTik Netwatch handles heartbeat monitoring locally —
+> eliminating the need for an always-on Azure Container Instance. See [Appendix D](#appendix-d--platform-comparison) for the full trade-off analysis.
 
 ---
 
@@ -10,74 +16,91 @@
 
 1. [Architecture Overview](#1-architecture-overview)
 2. [Prerequisites](#2-prerequisites)
-3. [Phase 1 — Local Ubuntu 26.04 LTS Setup](#3-phase-1--local-ubuntu-2604-lts-setup)
-4. [Phase 2 — Azure Failover Environment](#4-phase-2--azure-failover-environment)
-5. [Phase 3 — Data Replication Strategy](#5-phase-3--data-replication-strategy)
-6. [Phase 4 — Failover Automation](#6-phase-4--failover-automation)
-7. [Phase 5 — API Configuration for Integrations](#7-phase-5--api-configuration-for-integrations)
-8. [Phase 6 — Backup & Recovery](#8-phase-6--backup--recovery)
-9. [Day-2 Operations](#9-day-2-operations)
-10. [Upgrade Path](#10-upgrade-path)
+3. [Phase 1 — Windows Desktop Setup (WSL2 + Docker Engine)](#3-phase-1--windows-desktop-setup-wsl2--docker-engine)
+4. [Phase 1b — Ubuntu 26.04 LTS Setup (alternative primary)](#4-phase-1b--ubuntu-2604-lts-setup-alternative-primary)
+5. [Phase 2 — MikroTik RouterOS 7 Integration](#5-phase-2--mikrotik-routeros-7-integration)
+6. [Phase 3 — Azure Failover Environment](#6-phase-3--azure-failover-environment)
+7. [Phase 4 — Data Replication Strategy](#7-phase-4--data-replication-strategy)
+8. [Phase 5 — Failover Automation](#8-phase-5--failover-automation)
+9. [Phase 6 — API Configuration for Integrations](#9-phase-6--api-configuration-for-integrations)
+10. [Phase 7 — Backup & Recovery](#10-phase-7--backup--recovery)
+11. [Day-2 Operations](#11-day-2-operations)
+12. [Upgrade Path](#12-upgrade-path)
 
 ---
 
 ## 1. Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  CENTAURI ERPNEXT — HYBRID TOPOLOGY                         │
-│                                                             │
-│  ┌─────────────────────────┐      ┌──────────────────────┐ │
-│  │  PRIMARY (Laptop)        │      │  FAILOVER (Azure)    │ │
-│  │  Ubuntu Desktop 26.04   │      │  Azure VM B2s        │ │
-│  │                         │      │                      │ │
-│  │  ERPNext stack          │      │  ERPNext stack       │ │
-│  │  (Gunicorn + Nginx      │      │  (same compose)      │ │
-│  │   + Websocket + RQ)     │      │                      │ │
-│  │                         │      │  ┌─────────────────┐ │ │
-│  │  MariaDB 11.8 (master)  │─────▶│  │ MariaDB replica │ │ │
-│  │  Redis 8.6              │      │  └─────────────────┘ │ │
-│  │                         │      │  Redis 8.6           │ │
-│  │  Restic ──────────────────────▶│  Azure Blob Storage  │ │
-│  └────────────┬────────────┘      └──────────┬───────────┘ │
-│               │                              │             │
-│               └──────────┬───────────────────┘             │
-│                          ▼                                  │
-│              ┌───────────────────────┐                     │
-│              │  Azure DNS / CF DNS   │                     │
-│              │  erp.centauri.io      │                     │
-│              │  api.centauri.io      │                     │
-│              └───────────────────────┘                     │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  CENTAURI ERPNEXT — HYBRID TOPOLOGY (v2: Windows Desktop + MikroTik)     │
+│                                                                          │
+│  ┌──────────────────────────────────┐    ┌───────────────────────────┐  │
+│  │  PRIMARY — Windows Desktop        │    │  FAILOVER — Azure VM B2s  │  │
+│  │  WSL2 + Docker Engine             │    │  Ubuntu 24.04             │  │
+│  │                                   │    │                           │  │
+│  │  ERPNext stack                    │    │  ERPNext stack (same)     │  │
+│  │  (Gunicorn · Nginx · WS · RQ)     │    │                           │  │
+│  │                                   │    │  ┌─────────────────────┐  │  │
+│  │  MariaDB 11.8 (master) ═══════════╪════╪═▶│ MariaDB replica     │  │  │
+│  │  Redis 8.6              WireGuard │    │  └─────────────────────┘  │  │
+│  │                          tunnel   │    │  Redis 8.6                │  │
+│  │  Restic ──────────────────────────╪────╪─▶ Azure Blob Storage      │  │
+│  └─────────────┬────────────────────-┘    └──────────┬────────────────┘  │
+│                │                                     │                   │
+│  ┌─────────────▼───────────────────┐                │                   │
+│  │  MikroTik RouterOS 7            │                │                   │
+│  │                                 │                │                   │
+│  │  • WireGuard peer ──────────────╪────────────────┘  (replication)   │
+│  │  • Netwatch (health monitor) ───╪──→ triggers failover script        │
+│  │  • IP/Cloud DDNS                │                                    │
+│  │  • Port forward 443 → Desktop   │                                    │
+│  │  • Firewall: WG-only for 3306   │                                    │
+│  └─────────────────────────────────┘                                    │
+│                                                                          │
+│              ┌──────────────────────────────┐                           │
+│              │  Cloudflare DNS              │                           │
+│              │  erp.centauri.io  TTL=60     │                           │
+│              │  api.centauri.io             │                           │
+│              └──────────────────────────────┘                           │
+└──────────────────────────────────────────────────────────────────────────┘
 
-FAILOVER LOGIC:
-  Heartbeat monitor (Azure) pings local every 60s
-  → Laptop offline for 3 min → Azure Logic App starts containers
-  → DNS A-record updated to Azure public IP
-  → Laptop comes back online → drain Azure → switch DNS back
+REPLICATION CHANNEL:  MikroTik WireGuard VPN  (10.100.0.1 ↔ 10.100.0.2)
+                      MariaDB binlog travels inside encrypted tunnel
+                      Port 3306 never exposed to the public internet
+
+FAILOVER LOGIC:  MikroTik Netwatch pings /api/method/ping every 30s
+  → 3 consecutive failures (~90s) → RouterOS script calls Azure REST API
+  → Azure VM starts → containers come up → Cloudflare DNS updated
+  → Desktop back online → Netwatch up-script → failback + VM deallocated
 ```
 
 ### Key Design Decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Replication method | MariaDB semi-sync binlog + Restic full backup | Near-real-time with a full-backup safety net |
-| Failover trigger | Azure Logic App heartbeat monitor | No extra infra on laptop side |
-| DNS | Cloudflare (free) or Azure DNS | Sub-60s TTL propagation |
-| API auth | Frappe API keys + OAuth2 | Stateless, revocable, per-integration |
-| Compose style | Base `compose.yaml` + layered overrides | Keeps parity between local and Azure |
+| Primary host | Windows Desktop (WSL2) | Always-on desktop, no sleep/hibernate risk |
+| Docker runtime | WSL2 + Docker Engine (no Desktop) | Native Linux perf, no Docker Desktop license |
+| Replication tunnel | MikroTik WireGuard | Encrypted, zero public port exposure for MariaDB |
+| Heartbeat monitor | MikroTik Netwatch | Free, on-device, no extra Azure infra needed |
+| DDNS | MikroTik IP/Cloud (free) | Automatic, no third-party service |
+| Replication method | MariaDB semi-sync binlog + Restic | Near-real-time + full-backup safety net |
+| DNS failover | Cloudflare API (TTL=60) | Sub-60s propagation |
+| API auth | Frappe API keys + OAuth2 | Stateless, revocable, per-integration scope |
+| Compose style | Base `compose.yaml` + layered overrides | Identical stack on Windows and Azure |
 
 ---
 
 ## 2. Prerequisites
 
-### 2.1 Local Machine
+### 2.1 Primary Machine (Windows Desktop)
 
-- Ubuntu Desktop 26.04 LTS (fresh install or upgrade path)
-- Minimum specs: 8 GB RAM, 4 CPU cores, 100 GB SSD
-- Static LAN IP or DDNS entry (e.g. `home.centauri.io`) for Azure to reach
-- Router: port-forward 443 → laptop (or use Cloudflare Tunnel if NAT is restrictive)
-- Domain name with API access (Cloudflare recommended)
+- Windows 10 22H2+ or Windows 11 (WSL2 requires a current build)
+- **Minimum:** 16 GB RAM, 6+ CPU cores, 200 GB SSD free for WSL2 + Docker volumes
+- WSL2 feature enabled (see Phase 1 for one-command install)
+- Static LAN IP assigned via MikroTik DHCP reservation
+- MikroTik RouterOS 7.x (WireGuard requires ≥ 7.1)
+- Domain with Cloudflare DNS (for API-based record updates during failover)
 
 ### 2.2 Azure
 
@@ -89,35 +112,256 @@ FAILOVER LOGIC:
   - Logic App for heartbeat + failover orchestration
   - Azure DNS zone or reliance on Cloudflare API
 
-### 2.3 Tooling (both machines)
+### 2.3 Tooling
 
+On **Windows** (run in PowerShell as Administrator — covered in detail in Phase 1):
+```powershell
+wsl --install                          # enables WSL2 + installs Ubuntu
+winget install Microsoft.AzureCLI      # Azure CLI for failover scripts
+```
+
+Inside the **WSL2 Ubuntu** instance:
 ```bash
-# Docker Engine (not Desktop)
 curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER   # re-login after this
-
-# Docker Compose plugin
-sudo apt-get install -y docker-compose-plugin
-
-# Azure CLI (laptop only for setup)
-curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-
-# Restic (backup tool — already in the ERPNext production image)
+sudo usermod -aG docker $USER
 sudo apt-get install -y restic
+```
+
+On the **Azure VM** (Ubuntu 24.04 — covered in Phase 3):
+```bash
+curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker centauri
+sudo apt-get install -y restic wireguard-tools
 ```
 
 ---
 
-## 3. Phase 1 — Local Ubuntu 26.04 LTS Setup
+## 3. Phase 1 — Windows Desktop Setup (WSL2 + Docker Engine)
 
-### 3.1 Clone and Configure
+### 3.1 Enable WSL2 and Install Ubuntu
+
+Run in **PowerShell (Administrator)**:
+
+```powershell
+# Install WSL2 with Ubuntu 24.04 (ships with all Windows 11 / Win10 22H2+)
+wsl --install -d Ubuntu-24.04
+
+# After reboot, set WSL2 as default
+wsl --set-default-version 2
+wsl --set-default Ubuntu-24.04
+```
+
+### 3.2 Tune WSL2 Resource Limits
+
+Create `C:\Users\<YourUser>\.wslconfig` (replace `<YourUser>`):
+
+```ini
+[wsl2]
+# Leave ~6 GB for Windows. ERPNext needs ~4-5 GB under normal load.
+memory=10GB
+processors=6
+swap=4GB
+
+# Store the WSL2 VHD on your fastest drive
+# (leave commented to use default %LOCALAPPDATA%\Packages\...)
+# kernel=
+
+[experimental]
+# Enable sparse VHD so the disk image only consumes space actually used
+sparseVhd=true
+```
+
+Restart WSL2 after creating this file:
+```powershell
+wsl --shutdown
+wsl
+```
+
+### 3.3 Install Docker Engine Inside WSL2
+
+Open an **Ubuntu WSL2 terminal** (not Docker Desktop — no license required):
+
+```bash
+# Docker Engine — native Linux, no VM-within-VM overhead
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Verify
+docker run --rm hello-world
+```
+
+Configure Docker daemon for better WSL2 performance. Create `/etc/docker/daemon.json`:
+
+```json
+{
+  "storage-driver": "overlay2",
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+```
+
+```bash
+sudo systemctl enable docker
+sudo systemctl start docker
+```
+
+**Important — keep volumes in the WSL2 filesystem:**
+Docker volumes at `/var/lib/docker/volumes/` inside WSL2 have native Linux I/O speed.
+Avoid mounting paths under `/mnt/c/` or `/mnt/d/` for database volumes — cross-filesystem
+I/O is 5-10× slower and will make MariaDB noticeably sluggish.
+
+### 3.4 Auto-start Docker on Windows Boot
+
+WSL2 does not start automatically on login by default. Create a Windows Task Scheduler task
+that launches the WSL2 instance (and with it, the Docker daemon):
+
+1. Open **Task Scheduler** → Create Task
+2. **General:** Name = `Centauri WSL2 Docker`, Run whether user is logged in or not, Run with highest privileges
+3. **Triggers:** At startup, delay 30 seconds
+4. **Actions:** Start a program
+   - Program: `wsl.exe`
+   - Arguments: `-u root service docker start`
+5. **Conditions:** Uncheck "Start only if on AC power"
+
+Or do this via PowerShell (run as Administrator, once):
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-u root service docker start"
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "Centauri WSL2 Docker" -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Force
+```
+
+### 3.5 Prevent Unplanned Reboots from Windows Update
+
+```powershell
+# Set Active Hours (Windows won't reboot during these hours for updates)
+# Adjust to your working hours — this example is 07:00–23:00
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings" `
+  -Name "ActiveHoursStart" -Value 7
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings" `
+  -Name "ActiveHoursEnd" -Value 23
+
+# Defer feature updates 365 days, quality updates 14 days (GPO equivalent via registry)
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" `
+  -Name "DeferFeatureUpdates" -Value 1 -Force
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" `
+  -Name "DeferFeatureUpdatesPeriodInDays" -Value 365 -Force
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" `
+  -Name "DeferQualityUpdatesPeriodInDays" -Value 14 -Force
+```
+
+### 3.6 Clone and Configure ERPNext
+
+Inside the **WSL2 Ubuntu terminal**:
+
+```bash
+sudo mkdir -p /opt/centauri
+sudo chown $USER:$USER /opt/centauri
+
+git clone https://github.com/geekswagg/frappe_docker.git /opt/centauri/frappe_docker
+cd /opt/centauri/frappe_docker
+
+cp centauri/config/centauri.env.template .env
+# Edit .env — fill in DB_PASSWORD, LETSENCRYPT_EMAIL, SITES_RULE
+nano .env
+```
+
+### 3.7 Launch the Stack
+
+```bash
+cd /opt/centauri/frappe_docker
+
+docker compose \
+  -f compose.yaml \
+  -f overrides/compose.mariadb.yaml \
+  -f overrides/compose.redis.yaml \
+  -f overrides/compose.https.yaml \
+  -f overrides/compose.backup-cron.yaml \
+  -f overrides/compose.mariadb-replication.yaml \
+  --env-file .env \
+  -p centauri \
+  up -d
+```
+
+### 3.8 Create the ERPNext Site
+
+```bash
+# Wait for configurator to finish (~2 min on first boot)
+docker compose -p centauri logs -f configurator
+
+# Create site
+docker compose -p centauri exec backend \
+  bench new-site erp.centauri.io \
+    --db-root-password "$(grep DB_PASSWORD /opt/centauri/frappe_docker/.env | cut -d= -f2)" \
+    --admin-password "<admin-password>" \
+    --install-app erpnext
+
+docker compose -p centauri exec backend \
+  bench --site erp.centauri.io enable-scheduler
+```
+
+### 3.9 WSL2 Auto-start for the ERPNext Stack
+
+Add to `/etc/rc.local` inside WSL2 (created if missing):
+
+```bash
+sudo tee /etc/rc.local > /dev/null << 'EOF'
+#!/bin/bash
+cd /opt/centauri/frappe_docker
+docker compose \
+  -f compose.yaml \
+  -f overrides/compose.mariadb.yaml \
+  -f overrides/compose.redis.yaml \
+  -f overrides/compose.https.yaml \
+  -f overrides/compose.backup-cron.yaml \
+  -f overrides/compose.mariadb-replication.yaml \
+  --env-file .env \
+  -p centauri \
+  up -d
+exit 0
+EOF
+sudo chmod +x /etc/rc.local
+```
+
+Update the Task Scheduler action (step 3.4) to also run rc.local:
+```powershell
+$action = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-u root bash /etc/rc.local"
+```
+
+### 3.10 Create Replication User
+
+```bash
+DB_PASSWORD="$(grep DB_PASSWORD /opt/centauri/frappe_docker/.env | cut -d= -f2)"
+
+docker compose -p centauri exec db \
+  mariadb -uroot -p"$DB_PASSWORD" -e "
+    CREATE USER IF NOT EXISTS 'replicator'@'10.100.0.%'
+      IDENTIFIED BY '<replication-password>';
+    GRANT REPLICATION SLAVE ON *.* TO 'replicator'@'10.100.0.%';
+    FLUSH PRIVILEGES;
+  "
+```
+
+The `10.100.0.%` scope restricts the replication user to the WireGuard tunnel subnet only.
+
+---
+
+## 4. Phase 1b — Ubuntu 26.04 LTS Setup (alternative primary)
+
+> Skip this section if using the Windows Desktop as primary (recommended).
+> Keep it as a reference if you prefer a Linux-native host or want a second local node.
+
+### 4.1 Clone and Configure
 
 ```bash
 git clone https://github.com/geekswagg/frappe_docker.git /opt/centauri/frappe_docker
 cd /opt/centauri/frappe_docker
-
-# Copy and edit env
-cp example.env .env
+cp centauri/config/centauri.env.template .env
+nano .env
 ```
 
 Edit `.env` — minimum changes:
@@ -271,9 +515,210 @@ sudo systemctl enable centauri-erpnext
 
 ---
 
-## 4. Phase 2 — Azure Failover Environment
+## 5. Phase 2 — MikroTik RouterOS 7 Integration
 
-### 4.1 Provision Azure Resources
+MikroTik handles three jobs that would otherwise require separate cloud services:
+1. **WireGuard VPN** — secure tunnel for MariaDB replication to Azure (no public port needed)
+2. **Netwatch** — local heartbeat monitor that fires failover/failback scripts
+3. **IP/Cloud DDNS** — keeps a stable hostname even if your ISP changes your public IP
+
+All configuration is done via MikroTik's terminal (`/terminal` in WinBox or SSH).
+
+### 5.1 Enable IP/Cloud DDNS
+
+```
+/ip cloud set ddns-enabled=yes ddns-update-interval=5m
+/ip cloud print
+```
+
+This gives you a hostname like `<hash>.sn.mynetname.net`. Set a CNAME in Cloudflare:
+`home.centauri.io CNAME <hash>.sn.mynetname.net` — or update your `PRIMARY_URL` env var to use this directly.
+
+### 5.2 Port Forward HTTPS to the Windows Desktop
+
+Replace `192.168.1.100` with the static LAN IP you reserved for the Windows desktop:
+
+```
+/ip firewall nat add \
+  chain=dstnat \
+  protocol=tcp \
+  dst-port=443 \
+  action=dst-nat \
+  to-addresses=192.168.1.100 \
+  to-ports=443 \
+  comment="ERPNext HTTPS"
+
+/ip firewall nat add \
+  chain=dstnat \
+  protocol=tcp \
+  dst-port=80 \
+  action=dst-nat \
+  to-addresses=192.168.1.100 \
+  to-ports=80 \
+  comment="ERPNext HTTP (ACME challenge)"
+```
+
+### 5.3 Generate WireGuard Keys
+
+On both the MikroTik **and** the Azure VM, generate key pairs:
+
+**On MikroTik:**
+```
+/interface wireguard add name=wg-centauri listen-port=51820 mtu=1420
+/interface wireguard print           # note the public-key
+```
+
+**On Azure VM (Ubuntu):**
+```bash
+wg genkey | tee /etc/wireguard/azure-private.key | wg pubkey > /etc/wireguard/azure-public.key
+cat /etc/wireguard/azure-public.key   # copy this
+```
+
+### 5.4 Configure WireGuard on MikroTik
+
+```
+# Add Azure VM as a peer (replace with actual Azure VM public IP and public key)
+/interface wireguard peers add \
+  interface=wg-centauri \
+  public-key="<AZURE_VM_WG_PUBLIC_KEY>" \
+  endpoint-address=<AZURE_VM_PUBLIC_IP> \
+  endpoint-port=51820 \
+  allowed-address=10.100.0.2/32 \
+  persistent-keepalive=25s \
+  comment="centauri-azure-failover"
+
+# Assign WireGuard interface an IP in the tunnel subnet
+/ip address add address=10.100.0.1/30 interface=wg-centauri
+```
+
+### 5.5 Configure WireGuard on Azure VM
+
+Create `/etc/wireguard/wg0.conf` on the Azure VM:
+
+```ini
+[Interface]
+PrivateKey = <contents of /etc/wireguard/azure-private.key>
+Address    = 10.100.0.2/30
+ListenPort = 51820
+
+[Peer]
+# MikroTik router
+PublicKey           = <MIKROTIK_WG_PUBLIC_KEY>
+Endpoint            = <MIKROTIK_PUBLIC_IP_OR_CLOUD_DNS>:51820
+AllowedIPs          = 10.100.0.1/32, 192.168.1.100/32
+PersistentKeepalive = 25
+```
+
+```bash
+sudo systemctl enable wg-quick@wg0
+sudo systemctl start wg-quick@wg0
+
+# Verify tunnel
+ping 10.100.0.1
+```
+
+The WireGuard interface on MikroTik must be reachable from Azure. Open port 51820/UDP on the
+MikroTik firewall:
+
+```
+/ip firewall filter add \
+  chain=input \
+  protocol=udp \
+  dst-port=51820 \
+  action=accept \
+  comment="WireGuard"
+```
+
+### 5.6 Route MariaDB Replication Through the Tunnel
+
+On the Windows desktop (WSL2), add a static route so traffic to `10.100.0.2` goes via the
+tunnel (MikroTik handles NAT transparently since the desktop is behind it):
+
+```bash
+# Inside WSL2 — the gateway is the MikroTik LAN IP
+sudo ip route add 10.100.0.0/30 via 192.168.1.1
+```
+
+The Azure VM replica will connect to the master at `10.100.0.1` (MikroTik WireGuard IP,
+which NATs to `192.168.1.100:3306` — the Windows desktop MariaDB).
+
+> Alternatively, configure MikroTik NAT to forward `10.100.0.1:3306 → 192.168.1.100:3306`:
+> ```
+> /ip firewall nat add chain=dstnat dst-address=10.100.0.1 protocol=tcp \
+>   dst-port=3306 action=dst-nat to-addresses=192.168.1.100 to-ports=3306
+> ```
+
+### 5.7 MikroTik Netwatch — Health Monitor and Failover Trigger
+
+Netwatch polls a URL every N seconds and runs RouterOS scripts on state change.
+
+First, create the failover notification scripts. These call the Azure REST API to start the VM:
+
+```
+/system script add name=centauri-failover source={
+  :local subId "<YOUR_AZURE_SUBSCRIPTION_ID>";
+  :local rg "centauri-erpnext-rg";
+  :local vm "centauri-erpnext-failover";
+  :local token [/tool fetch url="https://login.microsoftonline.com/<TENANT_ID>/oauth2/token" \
+    http-method=post \
+    http-data="grant_type=client_credentials&client_id=<CLIENT_ID>&client_secret=<CLIENT_SECRET>&resource=https://management.azure.com/" \
+    output=user as-value];
+  :local startUrl ("https://management.azure.com/subscriptions/" . $subId . \
+    "/resourceGroups/" . $rg . "/providers/Microsoft.Compute/virtualMachines/" . $vm . \
+    "/start?api-version=2023-07-01");
+  /tool fetch url=$startUrl http-method=post \
+    http-header-field=("Authorization: Bearer " . ($token->"data")) \
+    output=none;
+  :log warning "Centauri: failover triggered — Azure VM starting";
+}
+
+/system script add name=centauri-failback source={
+  :log info "Centauri: primary back online — failback will run automatically via heartbeat.sh";
+}
+```
+
+Add the Netwatch entry:
+
+```
+/tool netwatch add \
+  host=erp.centauri.io \
+  interval=30s \
+  timeout=10s \
+  up-script=centauri-failback \
+  down-script=centauri-failover \
+  comment="Centauri ERPNext health"
+```
+
+> **Service Principal for Netwatch:** The Azure REST API calls need a service principal with
+> `Contributor` role scoped to the VM resource only. Create it with:
+> ```bash
+> az ad sp create-for-rbac \
+>   --name centauri-netwatch \
+>   --role Contributor \
+>   --scopes /subscriptions/<SUB>/resourceGroups/centauri-erpnext-rg/providers/Microsoft.Compute/virtualMachines/centauri-erpnext-failover
+> ```
+> Copy the `appId` (CLIENT_ID), `password` (CLIENT_SECRET), and `tenant` (TENANT_ID) into the script above.
+
+### 5.8 Firewall — Restrict MariaDB Port
+
+MariaDB must only be reachable from the WireGuard tunnel subnet, never the public internet:
+
+```
+# On the Windows machine (WSL2) — block 3306 from everything except the WireGuard interface
+# This is enforced inside WSL2 via iptables:
+sudo iptables -A INPUT -p tcp --dport 3306 -s 10.100.0.0/30 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 3306 -j DROP
+
+# Persist iptables rules
+sudo apt-get install -y iptables-persistent
+sudo netfilter-persistent save
+```
+
+---
+
+## 6. Phase 3 — Azure Failover Environment
+
+### 6.1 Provision Azure Resources
 
 ```bash
 az login
@@ -429,7 +874,7 @@ The VM is now in a stopped (deallocated) state — no compute cost until failove
 
 ---
 
-## 5. Phase 3 — Data Replication Strategy
+## 7. Phase 4 — Data Replication Strategy
 
 Two complementary layers:
 
@@ -529,62 +974,24 @@ When binlog replication is behind (e.g. laptop was off for a while), the Azure f
 
 ---
 
-## 6. Phase 4 — Failover Automation
+## 8. Phase 5 — Failover Automation
 
-### 6.1 Heartbeat Monitor Script (Runs on Azure Logic App)
+With the Windows Desktop + MikroTik setup, **MikroTik Netwatch is the primary trigger** (configured in Phase 2, step 5.7). The scripts in `centauri/scripts/` are invoked by Netwatch via SSH or the Azure REST API call embedded in the RouterOS script. This section documents the full flow and the scripts for reference.
 
-Create an Azure Logic App with a Recurrence trigger (every 60 seconds) that calls an HTTP endpoint on your laptop. If it fails 3 consecutive times, it triggers failover.
+### 8.1 Failover Flow
 
-**Alternative (simpler):** A small script on an always-on Azure Container Instance (very cheap, ~$3/month):
-
-```bash
-# Deploy heartbeat monitor as Azure Container Instance
-az container create \
-  --resource-group centauri-erpnext-rg \
-  --name centauri-heartbeat \
-  --image mcr.microsoft.com/azure-cli:latest \
-  --restart-policy Always \
-  --command-line "/bin/bash /scripts/heartbeat.sh" \
-  --environment-variables \
-    PRIMARY_URL="https://erp.centauri.io/api/method/ping" \
-    VM_RESOURCE_GROUP="centauri-erpnext-rg" \
-    VM_NAME="centauri-erpnext-failover" \
-    CF_API_TOKEN="<cloudflare-api-token>" \
-    CF_ZONE_ID="<cloudflare-zone-id>" \
-    AZURE_VM_PUBLIC_IP="<azure-vm-public-ip>"
+```
+MikroTik Netwatch → 3 failed pings (90s total)
+  → RouterOS script: Azure REST API → vm start
+  → failover.sh (SSH from Netwatch host or Azure Automation):
+      1. Wait for VM running
+      2. Check replication lag
+      3. Promote replica OR restore from Restic
+      4. Start full ERPNext stack
+      5. Update Cloudflare DNS → Azure IP
 ```
 
-`heartbeat.sh` (stored in Azure Storage, mounted into ACI):
-
-```bash
-#!/bin/bash
-FAIL_COUNT=0
-MAX_FAILS=3
-CHECK_INTERVAL=60
-FAILOVER_ACTIVE=false
-
-while true; do
-  if curl -sf --max-time 10 "$PRIMARY_URL" > /dev/null 2>&1; then
-    FAIL_COUNT=0
-    if [ "$FAILOVER_ACTIVE" = "true" ]; then
-      echo "$(date): Primary back online — triggering failback"
-      bash /scripts/failback.sh
-      FAILOVER_ACTIVE=false
-    fi
-  else
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-    echo "$(date): Primary unreachable (attempt $FAIL_COUNT/$MAX_FAILS)"
-    if [ "$FAIL_COUNT" -ge "$MAX_FAILS" ] && [ "$FAILOVER_ACTIVE" = "false" ]; then
-      echo "$(date): Triggering failover"
-      bash /scripts/failover.sh
-      FAILOVER_ACTIVE=true
-    fi
-  fi
-  sleep $CHECK_INTERVAL
-done
-```
-
-### 6.2 Failover Script (`failover.sh`)
+### 8.2 Failover Script (`failover.sh`)
 
 ```bash
 #!/bin/bash
@@ -656,7 +1063,7 @@ curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_rec
 echo "=== FAILOVER COMPLETE: $(date -Iseconds) === DNS → Azure"
 ```
 
-### 6.3 Failback Script (`failback.sh`)
+### 8.3 Failback Script (`failback.sh`)
 
 ```bash
 #!/bin/bash
@@ -690,16 +1097,17 @@ az vm deallocate \
   --resource-group centauri-erpnext-rg \
   --name centauri-erpnext-failover
 
-echo "=== FAILBACK COMPLETE: $(date -Iseconds) === DNS → Laptop"
+echo "=== FAILBACK COMPLETE: $(date -Iseconds) === DNS → Desktop"
 ```
 
-### 6.4 Pre-configure DNS TTL
+### 8.4 Pre-configure DNS TTL
 
-Before go-live, set DNS record TTL to 60 seconds so failover DNS changes propagate quickly. Set this at least 24 hours before the first expected switchover so resolvers expire the old long-TTL cached record.
+Before go-live, set the DNS record TTL to 60 seconds so failover DNS changes propagate quickly.
+Set this at least 24 hours before the first expected switchover so resolvers expire the old long-TTL cached record.
 
 ---
 
-## 7. Phase 5 — API Configuration for Integrations
+## 9. Phase 6 — API Configuration for Integrations
 
 ERPNext v16 exposes a comprehensive REST API. Here is how to configure it for Centauri's API-heavy integration pattern.
 
@@ -823,7 +1231,7 @@ services:
 
 ---
 
-## 8. Phase 6 — Backup & Recovery
+## 10. Phase 7 — Backup & Recovery
 
 ### 8.1 Backup Schedule
 
@@ -868,7 +1276,7 @@ mysqlbinlog \
 
 ---
 
-## 9. Day-2 Operations
+## 11. Day-2 Operations
 
 ### 9.1 Common Bench Commands
 
@@ -945,7 +1353,7 @@ docker compose -p centauri up -d --scale queue-short=3 --scale queue-long=2
 
 ---
 
-## 10. Upgrade Path
+## 12. Upgrade Path
 
 ### ERPNext Version Upgrade
 
@@ -1005,28 +1413,71 @@ EOF
 
 ## Appendix B — Cost Estimate (Azure)
 
+MikroTik Netwatch replaces the Azure Container Instance heartbeat monitor — saving ~$5/month.
+
 | Resource | SKU | Monthly Cost (Est.) |
 |---|---|---|
 | VM (Standard_B2s, deallocated) | ~0 hrs/month compute | ~$1 (disk only) |
 | VM (Standard_B2s, running) | 8 hrs/day failover | ~$8 |
 | Storage account (100 GB) | Standard LRS | ~$2 |
-| Azure Container Instance (heartbeat) | 0.5 vCPU, 1 GB, always-on | ~$5 |
 | Azure DNS zone | 1 zone | ~$1 |
-| **Total (normal)** | | **~$9/month** |
-| **Total (heavy failover, 8h/day)** | | **~$17/month** |
+| ~~Azure Container Instance~~ | ~~replaced by MikroTik Netwatch~~ | ~~$0~~ |
+| **Total (normal — no failover)** | | **~$4/month** |
+| **Total (heavy failover, 8h/day)** | | **~$12/month** |
 
 ## Appendix C — Quick Reference Card
 
 ```
-Start local stack:    systemctl start centauri-erpnext
-Stop local stack:     systemctl stop centauri-erpnext
+# ── Stack management (run in WSL2) ───────────────────────────────────────────
+Start stack:          docker compose -p centauri up -d
+Stop stack:           docker compose -p centauri down
 Status:               docker compose -p centauri ps
-Logs:                 docker compose -p centauri logs -f
+Logs (all):           docker compose -p centauri logs -f
+Logs (backend):       docker compose -p centauri logs -f backend
+
+# ── Bench shortcuts ───────────────────────────────────────────────────────────
 Bench shell:          docker compose -p centauri exec backend bash
 Bench migrate:        docker compose -p centauri exec backend bench --site erp.centauri.io migrate
-Force backup now:     /opt/centauri/scripts/backup.sh
+Clear cache:          docker compose -p centauri exec backend bench --site erp.centauri.io clear-cache
+Build assets:         docker compose -p centauri exec backend bench --site erp.centauri.io build
+
+# ── Data & replication ────────────────────────────────────────────────────────
+Force backup now:     bash /opt/centauri/frappe_docker/centauri/scripts/backup.sh
 Check replication:    docker compose -p centauri exec db mariadb -uroot -p$DB_PASSWORD -e "SHOW SLAVE STATUS\G"
-Manual failover:      bash /scripts/failover.sh
-Manual failback:      bash /scripts/failback.sh
-Restic list:          RESTIC_REPOSITORY=azure:restic-repo:/ restic snapshots
+List Restic snaps:    RESTIC_REPOSITORY=azure:restic-repo:/ restic snapshots
+
+# ── Failover / failback ───────────────────────────────────────────────────────
+Manual failover:      bash /opt/centauri/frappe_docker/centauri/scripts/failover.sh
+Manual failback:      bash /opt/centauri/frappe_docker/centauri/scripts/failback.sh
+
+# ── MikroTik (WinBox terminal or SSH) ────────────────────────────────────────
+Check Netwatch:       /tool netwatch print
+WireGuard status:     /interface wireguard peers print
+Check DDNS:           /ip cloud print
+Run failover script:  /system script run centauri-failover
+
+# ── WSL2 (PowerShell on Windows) ─────────────────────────────────────────────
+Restart WSL2:         wsl --shutdown && wsl
+WSL2 memory usage:    wsl -- free -h
+Start Docker in WSL2: wsl -u root service docker start
 ```
+
+## Appendix D — Platform Comparison
+
+| Criterion | Windows Desktop (WSL2) | Ubuntu Laptop | Ubuntu Desktop |
+|---|---|---|---|
+| **Uptime risk** | Low — desktop, always-on | High — sleep/hibernate/battery | Low — always-on |
+| **Docker overhead** | Minimal — Docker Engine in WSL2 | Native | Native |
+| **Docker licensing** | None (Engine, not Desktop) | None | None |
+| **WireGuard (replication)** | Via MikroTik router | Via MikroTik router | Via MikroTik router |
+| **Heartbeat monitor** | MikroTik Netwatch (free) | MikroTik Netwatch (free) | MikroTik Netwatch (free) |
+| **Auto-start** | Task Scheduler + WSL2 rc.local | systemd | systemd |
+| **Windows Update reboot** | Manageable (Active Hours + deferral) | N/A | N/A |
+| **RAM for ERPNext** | ~10 GB of 16 GB available to WSL2 | Depends on model | Depends on config |
+| **File I/O for volumes** | Good (WSL2 ext4 VHD, not /mnt/c) | Native | Native |
+| **Verdict** | **Recommended primary** | Acceptable secondary | Equal to Windows Desktop |
+
+**Bottom line:** A Windows Desktop behind MikroTik RouterOS 7 is the recommended primary because
+the desktop form factor eliminates the sleep/battery risk and the MikroTik provides WireGuard +
+Netwatch for free — two cloud services you would otherwise pay for. WSL2 with Docker Engine
+(not Docker Desktop) runs ERPNext at near-native Linux performance with no licensing concern.

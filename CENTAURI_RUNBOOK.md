@@ -60,8 +60,8 @@
 │                                                                          │
 │              ┌──────────────────────────────┐                           │
 │              │  Cloudflare DNS              │                           │
-│              │  erp.centauri.io  TTL=60     │                           │
-│              │  api.centauri.io             │                           │
+│              │  erp.comwenga.com  TTL=60     │                           │
+│              │  api.comwenga.com             │                           │
 │              └──────────────────────────────┘                           │
 └──────────────────────────────────────────────────────────────────────────┘
 
@@ -105,7 +105,7 @@ FAILOVER LOGIC:  MikroTik Netwatch pings /api/method/ping every 30s
 ### 2.2 Azure
 
 - Azure subscription (Pay-As-You-Go is fine)
-- Resource group: `centauri-erpnext-rg`
+- Resource group: `omwenga-erpnext-rg`
 - Services provisioned in Phase 2:
   - VM: Standard B2s (2 vCPU, 4 GB RAM) — stopped by default to save cost
   - Storage account for Restic backups and binlog archives
@@ -295,13 +295,13 @@ docker compose -p centauri logs -f configurator
 
 # Create site
 docker compose -p centauri exec backend \
-  bench new-site erp.centauri.io \
+  bench new-site erp.comwenga.com \
     --db-root-password "$(grep DB_PASSWORD /opt/centauri/frappe_docker/.env | cut -d= -f2)" \
     --admin-password "<admin-password>" \
     --install-app erpnext
 
 docker compose -p centauri exec backend \
-  bench --site erp.centauri.io enable-scheduler
+  bench --site erp.comwenga.com enable-scheduler
 ```
 
 ### 3.9 WSL2 Auto-start for the ERPNext Stack
@@ -378,7 +378,7 @@ GUNICORN_THREADS=4
 GUNICORN_TIMEOUT=120
 
 # Your domain
-SITES_RULE=Host(`erp.centauri.io`)
+SITES_RULE=Host(`erp.comwenga.com`)
 LETSENCRYPT_EMAIL=collins.kibagendi@technobraingbs.com
 
 # Increase for large file attachments / imports
@@ -419,14 +419,14 @@ docker compose -p centauri logs -f configurator
 
 # Create site
 docker compose -p centauri exec backend \
-  bench new-site erp.centauri.io \
+  bench new-site erp.comwenga.com \
     --db-root-password "$DB_PASSWORD" \
     --admin-password "<admin-password>" \
     --install-app erpnext
 
 # Enable scheduler
 docker compose -p centauri exec backend \
-  bench --site erp.centauri.io enable-scheduler
+  bench --site erp.comwenga.com enable-scheduler
 ```
 
 ### 3.4 Persist MariaDB Configuration for Replication
@@ -532,7 +532,7 @@ All configuration is done via MikroTik's terminal (`/terminal` in WinBox or SSH)
 ```
 
 This gives you a hostname like `<hash>.sn.mynetname.net`. Set a CNAME in Cloudflare:
-`home.centauri.io CNAME <hash>.sn.mynetname.net` — or update your `PRIMARY_URL` env var to use this directly.
+`home.comwenga.com CNAME <hash>.sn.mynetname.net` — or update your `PRIMARY_URL` env var to use this directly.
 
 ### 5.2 Port Forward HTTPS to the Windows Desktop
 
@@ -657,8 +657,8 @@ First, create the failover notification scripts. These call the Azure REST API t
 ```
 /system script add name=centauri-failover source={
   :local subId "<YOUR_AZURE_SUBSCRIPTION_ID>";
-  :local rg "centauri-erpnext-rg";
-  :local vm "centauri-erpnext-failover";
+  :local rg "omwenga-erpnext-rg";
+  :local vm "omwenga-erpnext-failover";
   :local token [/tool fetch url="https://login.microsoftonline.com/<TENANT_ID>/oauth2/token" \
     http-method=post \
     http-data="grant_type=client_credentials&client_id=<CLIENT_ID>&client_secret=<CLIENT_SECRET>&resource=https://management.azure.com/" \
@@ -681,7 +681,7 @@ Add the Netwatch entry:
 
 ```
 /tool netwatch add \
-  host=erp.centauri.io \
+  host=erp.comwenga.com \
   interval=30s \
   timeout=10s \
   up-script=centauri-failback \
@@ -695,7 +695,7 @@ Add the Netwatch entry:
 > az ad sp create-for-rbac \
 >   --name centauri-netwatch \
 >   --role Contributor \
->   --scopes /subscriptions/<SUB>/resourceGroups/centauri-erpnext-rg/providers/Microsoft.Compute/virtualMachines/centauri-erpnext-failover
+>   --scopes /subscriptions/<SUB>/resourceGroups/omwenga-erpnext-rg/providers/Microsoft.Compute/virtualMachines/omwenga-erpnext-failover
 > ```
 > Copy the `appId` (CLIENT_ID), `password` (CLIENT_SECRET), and `tenant` (TENANT_ID) into the script above.
 
@@ -722,16 +722,16 @@ sudo netfilter-persistent save
 
 ```bash
 az login
-RESOURCE_GROUP="centauri-erpnext-rg"
+RESOURCE_GROUP="omwenga-erpnext-rg"
 LOCATION="eastus"    # pick the region closest to you
-VM_NAME="centauri-erpnext-failover"
+VM_NAME="omwenga-erpnext-failover"
 
 # Resource group
 az group create --name $RESOURCE_GROUP --location $LOCATION
 
 # Storage account for Restic + binlog archives
 az storage account create \
-  --name centauribackups \
+  --name omwengabackups \
   --resource-group $RESOURCE_GROUP \
   --location $LOCATION \
   --sku Standard_LRS \
@@ -740,7 +740,7 @@ az storage account create \
 # Blob container for Restic repo
 az storage container create \
   --name restic-repo \
-  --account-name centauribackups
+  --account-name omwengabackups
 
 # VM — Standard_B2s: 2 vCPU, 4 GB RAM (~$30/month if always-on, ~$0 when deallocated)
 az vm create \
@@ -866,8 +866,8 @@ docker compose -p centauri exec db \
 
 ```bash
 az vm deallocate \
-  --resource-group centauri-erpnext-rg \
-  --name centauri-erpnext-failover
+  --resource-group omwenga-erpnext-rg \
+  --name omwenga-erpnext-failover
 ```
 
 The VM is now in a stopped (deallocated) state — no compute cost until failover triggers it.
@@ -902,7 +902,7 @@ sudo apt-get install -y restic
 
 # Environment variables (add to /etc/environment or a secrets file)
 export RESTIC_REPOSITORY="azure:restic-repo:/"
-export AZURE_ACCOUNT_NAME="centauribackups"
+export AZURE_ACCOUNT_NAME="omwengabackups"
 export AZURE_ACCOUNT_KEY="<storage-account-key>"
 export RESTIC_PASSWORD="<strong-encryption-passphrase>"
 
@@ -920,10 +920,10 @@ set -euo pipefail
 
 COMPOSE_DIR="/opt/centauri/frappe_docker"
 BACKUP_DIR="/opt/centauri/backup-staging"
-SITE="erp.centauri.io"
+SITE="erp.comwenga.com"
 
 export RESTIC_REPOSITORY="azure:restic-repo:/"
-export AZURE_ACCOUNT_NAME="centauribackups"
+export AZURE_ACCOUNT_NAME="omwengabackups"
 export AZURE_ACCOUNT_KEY="$(cat /run/secrets/azure-storage-key)"
 export RESTIC_PASSWORD="$(cat /run/secrets/restic-password)"
 
@@ -1053,12 +1053,12 @@ REMOTE_EOF
 
 # 4. Update DNS (Cloudflare) to point to Azure VM
 curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/$(
-  curl -s "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=erp.centauri.io" \
+  curl -s "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=erp.comwenga.com" \
     -H "Authorization: Bearer ${CF_API_TOKEN}" | jq -r '.result[0].id'
 )" \
   -H "Authorization: Bearer ${CF_API_TOKEN}" \
   -H "Content-Type: application/json" \
-  --data "{\"type\":\"A\",\"name\":\"erp.centauri.io\",\"content\":\"${AZURE_VM_PUBLIC_IP}\",\"ttl\":60,\"proxied\":false}"
+  --data "{\"type\":\"A\",\"name\":\"erp.comwenga.com\",\"content\":\"${AZURE_VM_PUBLIC_IP}\",\"ttl\":60,\"proxied\":false}"
 
 echo "=== FAILOVER COMPLETE: $(date -Iseconds) === DNS → Azure"
 ```
@@ -1076,12 +1076,12 @@ sleep 120
 # 2. Update DNS back to laptop
 LAPTOP_IP=$(curl -s https://api.ipify.org)  # or use your DDNS hostname
 curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/$(
-  curl -s "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=erp.centauri.io" \
+  curl -s "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=erp.comwenga.com" \
     -H "Authorization: Bearer ${CF_API_TOKEN}" | jq -r '.result[0].id'
 )" \
   -H "Authorization: Bearer ${CF_API_TOKEN}" \
   -H "Content-Type: application/json" \
-  --data "{\"type\":\"A\",\"name\":\"erp.centauri.io\",\"content\":\"${LAPTOP_IP}\",\"ttl\":60,\"proxied\":false}"
+  --data "{\"type\":\"A\",\"name\":\"erp.comwenga.com\",\"content\":\"${LAPTOP_IP}\",\"ttl\":60,\"proxied\":false}"
 
 # 3. Stop Azure VM (save cost)
 # Allow 5 min for any in-flight requests to drain
@@ -1094,8 +1094,8 @@ ssh centauri@"$AZURE_VM_IP" bash << 'REMOTE_EOF'
 REMOTE_EOF
 
 az vm deallocate \
-  --resource-group centauri-erpnext-rg \
-  --name centauri-erpnext-failover
+  --resource-group omwenga-erpnext-rg \
+  --name omwenga-erpnext-failover
 
 echo "=== FAILBACK COMPLETE: $(date -Iseconds) === DNS → Desktop"
 ```
@@ -1107,21 +1107,129 @@ Set this at least 24 hours before the first expected switchover so resolvers exp
 
 ---
 
-## 9. Phase 6 — API Configuration for Integrations
+## 9. Phase 6 — Omwenga Holdings Group Company Setup
 
-ERPNext v16 exposes a comprehensive REST API. Here is how to configure it for Centauri's API-heavy integration pattern.
+This phase must be completed **before** entering any operational data. Company structure in
+ERPNext is largely irreversible once transactions exist against it.
+
+### 9.1 Site Creation with Group Context
+
+When creating the site (Phase 1, step 3.8), use `erp.comwenga.com` as the site name:
+
+```bash
+docker compose -p centauri exec backend \
+  bench new-site erp.comwenga.com \
+    --db-root-password "$(grep DB_PASSWORD /opt/centauri/frappe_docker/.env | cut -d= -f2)" \
+    --admin-password "<admin-password>" \
+    --install-app erpnext
+```
+
+### 9.2 Create the Group Company Structure
+
+Log in as Administrator at `https://erp.comwenga.com`, then go to:
+**Setup → Company → New**
+
+Create companies in this exact order (parent must exist before children):
+
+| Step | Company Name | Abbreviation | Is Group | Parent Company | Default Currency |
+|---|---|---|---|---|---|
+| 1 | Omwenga Holdings | OHL | ✅ Yes | *(none)* | KES |
+| 2 | Centauri Consulting | CC | ☐ No | Omwenga Holdings | KES |
+| 3 | Giktek | GKT | ☐ No | Omwenga Holdings | KES |
+| 4 | Tecno Brain Incubator | TBI | ☐ No | Omwenga Holdings | KES |
+
+> **Abbreviation matters** — it prefixes all auto-generated account codes and document series.
+> Keep it short (2-3 chars) and unique. You cannot change it after transactions exist.
+
+### 9.3 Chart of Accounts
+
+ERPNext will create a default chart of accounts for each company from the Kenya template
+(select **Kenya - Chart of Accounts** during company creation).
+
+For a holding structure, configure **intercompany accounts** so cost allocations and loans
+between subsidiaries are tracked:
+
+In each subsidiary's Chart of Accounts, add:
+- `Intercompany Receivable` under Current Assets
+- `Intercompany Payable` under Current Liabilities
+
+Link these in **Accounts Settings → Intercompany Account** for each company pair.
+
+### 9.4 Consolidated Reporting
+
+Once all companies are set up, ERPNext's built-in consolidated reports work automatically:
+
+- **Consolidated Balance Sheet:** Accounting → Reports → Consolidated Balance Sheet
+  → Select parent: Omwenga Holdings
+- **Consolidated Profit & Loss:** Same path → Consolidated Profit and Loss Statement
+- **Group Cash Flow:** Accounting → Reports → Cash Flow (filter by group)
+
+These reports eliminate intercompany transactions and present the group as a single entity.
+
+### 9.5 User Access per Company
+
+Each user should be scoped to the companies they work in:
+
+**Setup → Users → [user] → Allow Modules + Company Access:**
+
+| Role example | Company access |
+|---|---|
+| Centauri Finance Manager | Centauri Consulting only |
+| Group CFO | All four companies |
+| Giktek Operations | Giktek only |
+| Group Administrator | All four companies |
+
+Roles are company-agnostic in ERPNext but document visibility is filtered by the user's
+allowed companies.
+
+### 9.6 DNS Records to Create in Cloudflare
+
+For the `comwenga.com` zone, create these records before going live:
+
+| Type | Name | Value | TTL | Notes |
+|---|---|---|---|---|
+| A | `erp` | `<your public IP>` | 60 | Main ERP URL — updated by failover scripts |
+| A | `api` | `<your public IP>` | 60 | Alias for integration docs; same target |
+| CNAME | `home` | `<hash>.sn.mynetname.net` | 3600 | MikroTik IP/Cloud DDNS |
+
+Set TTL to **60 seconds** on the `erp` and `api` records now, even before go-live, so
+Cloudflare's resolvers cache the short TTL. The MikroTik Netwatch failover script updates
+these `A` records automatically.
+
+### 9.7 Email Configuration per Company
+
+Each subsidiary will send email under its own domain. In ERPNext:
+
+**Settings → Email Account → New** — create one outbound account per company:
+
+| Company | Email | From Name |
+|---|---|---|
+| Omwenga Holdings | noreply@comwenga.com | Omwenga Holdings |
+| Centauri Consulting | noreply@centauriconsulting.com | Centauri Consulting |
+| Giktek | noreply@giktek.com | Giktek |
+| Tecno Brain Incubator | noreply@tecnobrain.com | Tecno Brain Incubator |
+
+Set each account's **Default Company** so outbound emails automatically use the correct
+sender when documents are sent from that company.
+
+---
+
+## 10. Phase 7 — API Configuration for Integrations
+
+ERPNext v16 exposes a comprehensive REST API. Here is how to configure it for the
+Omwenga Holdings group's API-heavy integration pattern.
 
 ### 7.1 Enable API Access
 
 ```bash
 # Increase API rate limits (run inside backend container)
 docker compose -p centauri exec backend \
-  bench --site erp.centauri.io set-config -g \
+  bench --site erp.comwenga.com set-config -g \
   allow_cors_origin "https://your-integration-domain.com"
 
 # Allow all origins for internal integrations (restrict in production)
 docker compose -p centauri exec backend \
-  bench --site erp.centauri.io set-config -g \
+  bench --site erp.comwenga.com set-config -g \
   allow_cors "*"
 ```
 
@@ -1133,7 +1241,7 @@ Or via bench:
 
 ```bash
 docker compose -p centauri exec backend \
-  bench --site erp.centauri.io execute frappe.core.doctype.user.user.generate_keys \
+  bench --site erp.comwenga.com execute frappe.core.doctype.user.user.generate_keys \
   --kwargs '{"user": "centauri-integration@technobraingbs.com"}'
 ```
 
@@ -1142,9 +1250,9 @@ Store keys in a secrets manager (Azure Key Vault or `pass`):
 ```bash
 # Every integration should have its own ERPNext user with minimal permissions
 # Example users:
-#   api-crm@centauri.io       → CRM read/write only
-#   api-finance@centauri.io   → Accounts read only
-#   api-warehouse@centauri.io → Stock read/write
+#   api-crm@comwenga.com       → CRM read/write only
+#   api-finance@comwenga.com   → Accounts read only
+#   api-warehouse@comwenga.com → Stock read/write
 ```
 
 ### 7.3 Authentication — Two Patterns
@@ -1153,7 +1261,7 @@ Store keys in a secrets manager (Azure Key Vault or `pass`):
 
 ```http
 GET /api/resource/Sales Order HTTP/1.1
-Host: erp.centauri.io
+Host: erp.comwenga.com
 Authorization: token <api_key>:<api_secret>
 ```
 
@@ -1163,7 +1271,7 @@ Authorization: token <api_key>:<api_secret>
 POST /api/method/frappe.integrations.oauth2.get_token HTTP/1.1
 Content-Type: application/x-www-form-urlencoded
 
-grant_type=password&username=user@centauri.io&password=xxx&client_id=xxx&client_secret=xxx
+grant_type=password&username=user@comwenga.com&password=xxx&client_id=xxx&client_secret=xxx
 ```
 
 ### 7.4 Core API Endpoints Reference
@@ -1186,7 +1294,7 @@ In ERPNext UI → **Settings → Webhooks** → New:
 
 - **DocType:** e.g. `Sales Invoice`
 - **DocEvent:** `on_submit`
-- **Request URL:** `https://your-system.centauri.io/webhooks/erpnext`
+- **Request URL:** `https://integrations.comwenga.com/webhooks/erpnext`
 - **Security Secret:** shared HMAC secret
 - **Headers:** `Content-Type: application/json`
 
@@ -1222,7 +1330,7 @@ services:
   traefik:
     command:
       # ... existing flags ...
-      - "--providers.docker.defaultRule=Host(`erp.centauri.io`)"
+      - "--providers.docker.defaultRule=Host(`erp.comwenga.com`)"
     labels:
       - "traefik.http.middlewares.api-ratelimit.ratelimit.average=100"
       - "traefik.http.middlewares.api-ratelimit.ratelimit.burst=50"
@@ -1231,7 +1339,7 @@ services:
 
 ---
 
-## 10. Phase 7 — Backup & Recovery
+## 11. Phase 8 — Backup & Recovery
 
 ### 8.1 Backup Schedule
 
@@ -1276,14 +1384,14 @@ mysqlbinlog \
 
 ---
 
-## 11. Day-2 Operations
+## 12. Day-2 Operations
 
 ### 9.1 Common Bench Commands
 
 All bench commands run inside the `backend` container:
 
 ```bash
-alias bench-exec='docker compose -p centauri exec backend bench --site erp.centauri.io'
+alias bench-exec='docker compose -p centauri exec backend bench --site erp.comwenga.com'
 
 # Clear cache
 bench-exec clear-cache
@@ -1353,7 +1461,7 @@ docker compose -p centauri up -d --scale queue-short=3 --scale queue-long=2
 
 ---
 
-## 12. Upgrade Path
+## 13. Upgrade Path
 
 ### ERPNext Version Upgrade
 
@@ -1379,7 +1487,7 @@ docker compose -p centauri up -d
 
 # 4. Rebuild assets if needed
 docker compose -p centauri exec backend \
-  bench --site erp.centauri.io build
+  bench --site erp.comwenga.com build
 ```
 
 ### Keeping Azure in Sync After Upgrade
@@ -1437,9 +1545,9 @@ Logs (backend):       docker compose -p centauri logs -f backend
 
 # ── Bench shortcuts ───────────────────────────────────────────────────────────
 Bench shell:          docker compose -p centauri exec backend bash
-Bench migrate:        docker compose -p centauri exec backend bench --site erp.centauri.io migrate
-Clear cache:          docker compose -p centauri exec backend bench --site erp.centauri.io clear-cache
-Build assets:         docker compose -p centauri exec backend bench --site erp.centauri.io build
+Bench migrate:        docker compose -p centauri exec backend bench --site erp.comwenga.com migrate
+Clear cache:          docker compose -p centauri exec backend bench --site erp.comwenga.com clear-cache
+Build assets:         docker compose -p centauri exec backend bench --site erp.comwenga.com build
 
 # ── Data & replication ────────────────────────────────────────────────────────
 Force backup now:     bash /opt/centauri/frappe_docker/centauri/scripts/backup.sh

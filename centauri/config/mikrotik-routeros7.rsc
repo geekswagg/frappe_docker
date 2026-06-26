@@ -105,8 +105,8 @@ set ddns-enabled=yes ddns-update-interval=5m
 add name=centauri-failover owner=admin policy=read,write,policy,test,password,sniff,sensitive,romon \
   source={
     :local subId "<AZURE_SUBSCRIPTION>";
-    :local rg "centauri-erpnext-rg";
-    :local vm "centauri-erpnext-failover";
+    :local rg "omwenga-erpnext-rg";
+    :local vm "omwenga-erpnext-failover";
     :local tenantId "<AZURE_TENANT_ID>";
     :local clientId "<AZURE_CLIENT_ID>";
     :local clientSecret "<AZURE_CLIENT_SECRET>";
@@ -145,7 +145,7 @@ add name=centauri-failback owner=admin policy=read,write,policy,test,password \
 # ── 6. Netwatch — health monitor ─────────────────────────────────────────────
 
 /tool netwatch
-add host=erp.centauri.io \
+add host=erp.comwenga.com \
   interval=30s \
   timeout=10s \
   up-script=centauri-failback \

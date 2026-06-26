@@ -1136,7 +1136,7 @@ Create companies in this exact order (parent must exist before children):
 | 1 | Omwenga Holdings | OHL | ✅ Yes | *(none)* | KES |
 | 2 | Centauri Consulting | CC | ☐ No | Omwenga Holdings | KES |
 | 3 | Giktek | GKT | ☐ No | Omwenga Holdings | KES |
-| 4 | Tecno Brain Incubator | TBI | ☐ No | Omwenga Holdings | KES |
+| 4 | Techno Brain Incubator | TBI | ☐ No | Omwenga Holdings | KES |
 
 > **Abbreviation matters** — it prefixes all auto-generated account codes and document series.
 > Keep it short (2-3 chars) and unique. You cannot change it after transactions exist.
@@ -1207,7 +1207,7 @@ Each subsidiary will send email under its own domain. In ERPNext:
 | Omwenga Holdings | noreply@comwenga.com | Omwenga Holdings |
 | Centauri Consulting | noreply@centauriconsulting.com | Centauri Consulting |
 | Giktek | noreply@giktek.com | Giktek |
-| Tecno Brain Incubator | noreply@tecnobrain.com | Tecno Brain Incubator |
+| Techno Brain Incubator | noreply@tecnobrain.com | Techno Brain Incubator |
 
 Set each account's **Default Company** so outbound emails automatically use the correct
 sender when documents are sent from that company.

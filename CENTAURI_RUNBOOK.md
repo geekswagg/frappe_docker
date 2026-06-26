@@ -314,6 +314,7 @@ the WSL2 instance starts — no systemd, no rc-local service, no Task Scheduler 
 ```bash
 sudo tee /opt/centauri/start-erpnext.sh > /dev/null << 'EOF'
 #!/bin/bash
+service docker start
 cd /opt/centauri/frappe_docker
 docker compose \
   -f compose.yaml \

@@ -1,0 +1,17 @@
+[mysqld]
+# Replication identity — must be unique across all nodes
+server-id          = 1
+log_bin            = /var/lib/mysql/mysql-bin
+binlog_format      = ROW
+binlog_row_image   = FULL
+expire_logs_days   = 7
+
+# Semi-synchronous replication: at least one replica must acknowledge each commit.
+# Falls back to async after rpl_semi_sync_master_timeout ms.
+plugin-load-add                = semisync_master.so
+rpl_semi_sync_master_enabled   = ON
+rpl_semi_sync_master_timeout   = 5000
+
+# Durability for a primary
+innodb_flush_log_at_trx_commit = 1
+sync_binlog                    = 1

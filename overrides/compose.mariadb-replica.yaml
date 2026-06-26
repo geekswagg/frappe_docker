@@ -1,0 +1,5 @@
+services:
+  db:
+    volumes:
+      - db-data:/var/lib/mysql
+      - ${MARIADB_REPLICA_CNF:-/opt/centauri/mariadb-replica.cnf}:/etc/mysql/conf.d/replication.cnf:ro

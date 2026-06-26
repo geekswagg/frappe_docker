@@ -1,0 +1,14 @@
+[mysqld]
+# Replication identity — must differ from master
+server-id                      = 2
+relay_log                      = /var/lib/mysql/relay-bin
+log_bin                        = /var/lib/mysql/mysql-bin
+binlog_format                  = ROW
+
+# Read-only until explicitly promoted during failover
+read_only                      = ON
+super_read_only                = ON
+
+# Semi-synchronous replica
+plugin-load-add                = semisync_slave.so
+rpl_semi_sync_slave_enabled    = ON

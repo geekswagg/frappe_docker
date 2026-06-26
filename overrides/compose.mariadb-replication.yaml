@@ -1,0 +1,7 @@
+services:
+  db:
+    volumes:
+      - db-data:/var/lib/mysql
+      - ${MARIADB_MASTER_CNF:-/opt/centauri/mariadb-master.cnf}:/etc/mysql/conf.d/replication.cnf:ro
+    ports:
+      - "127.0.0.1:3306:3306"

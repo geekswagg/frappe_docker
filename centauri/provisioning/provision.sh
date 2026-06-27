@@ -107,7 +107,10 @@ for m in "${RUN_MODULES[@]}"; do
   # line that base64-decodes and exec()s itself, so it runs atomically in the
   # frappe-initialised console namespace.
   payload="$(cat "$LIB" "$m" | base64 | tr -d '\n')"
-  runner="import base64; exec(base64.b64decode('${payload}').decode())"
+  # exec with ONE explicit namespace dict: IPython runs the cell in a frame where
+  # locals != globals, so a bare exec() puts top-level defs in locals while functions
+  # resolve names against globals -> NameError. Passing {} makes globals == locals.
+  runner="import base64; exec(base64.b64decode('${payload}').decode(), {})"
   set +e
   output="$(printf '%s\n' "$runner" | dc exec -T "${EXEC_ENV[@]}" backend bench --site "$SITE" console 2>&1)"
   set -e

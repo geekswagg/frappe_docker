@@ -47,7 +47,10 @@ def _hr_settings():
 
 def _component(name, abbr, ctype, account_name=None, tbi=None, **extra):
     """Idempotently ensure a Salary Component with the exact desired config."""
-    fields = {"type": ctype, "salary_component_abbr": abbr}
+    # Deductions are % of gross_pay (already payment-days-prorated), so they must NOT
+    # depend on payment days too — hrms rejects that as double-proration.
+    fields = {"type": ctype, "salary_component_abbr": abbr,
+              "depends_on_payment_days": 1 if ctype == "Earning" else 0}
     fields.update(extra)
     get_or_create("Salary Component", {"salary_component": name}, dict(fields))
     ensure_value("Salary Component", name, fields)   # enforce config on existing too
@@ -103,12 +106,12 @@ def _structure(tbi):
         d.append("earnings", {"salary_component": "Basic", "amount_based_on_formula": 1, "formula": "base"})
         d.append("earnings", {"salary_component": "House Rent Allowance", "amount_based_on_formula": 1, "formula": "base * 0.15"})
         d.append("earnings", {"salary_component": "Transport Allowance", "amount": 5000})
-        d.append("deductions", {"salary_component": "NSSF", "amount_based_on_formula": 1, "formula": NSSF_F})
-        d.append("deductions", {"salary_component": "Taxable Pay", "amount_based_on_formula": 1, "formula": TP_F, "statistical_component": 1})
-        d.append("deductions", {"salary_component": "PAYE Before Relief", "amount_based_on_formula": 1, "formula": PBR_F, "statistical_component": 1})
-        d.append("deductions", {"salary_component": "PAYE", "amount_based_on_formula": 1, "formula": PAYE_F})
-        d.append("deductions", {"salary_component": "SHIF", "amount_based_on_formula": 1, "formula": SHIF_F})
-        d.append("deductions", {"salary_component": "Housing Levy", "amount_based_on_formula": 1, "formula": HOUSING_F})
+        d.append("deductions", {"salary_component": "NSSF", "amount_based_on_formula": 1, "formula": NSSF_F, "depends_on_payment_days": 0})
+        d.append("deductions", {"salary_component": "Taxable Pay", "amount_based_on_formula": 1, "formula": TP_F, "statistical_component": 1, "depends_on_payment_days": 0})
+        d.append("deductions", {"salary_component": "PAYE Before Relief", "amount_based_on_formula": 1, "formula": PBR_F, "statistical_component": 1, "depends_on_payment_days": 0})
+        d.append("deductions", {"salary_component": "PAYE", "amount_based_on_formula": 1, "formula": PAYE_F, "depends_on_payment_days": 0})
+        d.append("deductions", {"salary_component": "SHIF", "amount_based_on_formula": 1, "formula": SHIF_F, "depends_on_payment_days": 0})
+        d.append("deductions", {"salary_component": "Housing Levy", "amount_based_on_formula": 1, "formula": HOUSING_F, "depends_on_payment_days": 0})
 
     ss = get_or_create("Salary Structure", {"name": STRUCTURE},
                        {"company": tbi, "currency": CFG["CURRENCY"],

@@ -9,16 +9,20 @@ and **survives any database teardown**.
 ## How it works
 
 Each module in `modules/` is a Python script run server-side through the Frappe ORM. The
-orchestrator streams `lib/_lib.py` + the module into `bench console` inside the backend
-container:
+orchestrator concatenates `lib/_lib.py` + the module, base64-encodes the result, and feeds
+`bench console` a single line that decodes and `exec()`s it inside the backend container:
 
 ```bash
-cat lib/_lib.py modules/10_companies.py \
+payload="$(cat lib/_lib.py modules/10_companies.py | base64 | tr -d '\n')"
+printf "import base64; exec(base64.b64decode('%s').decode())\n" "$payload" \
   | docker compose -p centauri exec -T backend bench --site erp.comwenga.com console
 ```
 
-`bench console` does not reliably exit non-zero on a Python error, so every module prints
-`PROVISION_OK <name>` on success and the orchestrator treats its absence as a failure.
+The single-line wrapper matters: `bench console` runs IPython, which corrupts multi-line
+code with blank lines when piped (blank lines terminate indented blocks), so the script
+must execute atomically. And because `bench console` does not reliably exit non-zero on a
+Python error, every module prints `PROVISION_OK <name>` on success and the orchestrator
+treats its absence as a failure.
 
 **Idempotency contract:** existence-checked inserts (never blind), existing docs mutated
 only when a value actually changed, one commit per module, sample transactions guarded by

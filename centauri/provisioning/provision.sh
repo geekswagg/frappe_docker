@@ -102,8 +102,14 @@ failed=0
 for m in "${RUN_MODULES[@]}"; do
   label="$(basename "$m" .py)"
   log "── ${label} ─────────────────────────────────────────────"
+  # bench console runs IPython, which corrupts multi-line/blank-line code when piped
+  # (blank lines end indented blocks → broken defs). Send the whole lib+module as ONE
+  # line that base64-decodes and exec()s itself, so it runs atomically in the
+  # frappe-initialised console namespace.
+  payload="$(cat "$LIB" "$m" | base64 | tr -d '\n')"
+  runner="import base64; exec(base64.b64decode('${payload}').decode())"
   set +e
-  output="$(cat "$LIB" "$m" | dc exec -T "${EXEC_ENV[@]}" backend bench --site "$SITE" console 2>&1)"
+  output="$(printf '%s\n' "$runner" | dc exec -T "${EXEC_ENV[@]}" backend bench --site "$SITE" console 2>&1)"
   set -e
   echo "$output"
   if echo "$output" | grep -q "PROVISION_OK ${label}"; then

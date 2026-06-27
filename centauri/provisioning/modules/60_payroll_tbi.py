@@ -15,9 +15,12 @@ S = CFG["STATUTORY"]
 def _map_account(doc, company, account_name):
     """Attach a Salary Component -> account mapping if the account exists."""
     acc = find_account(company, account_name=account_name)
-    if acc:
-        ensure_child(doc, "accounts", ["company"], {"company": company, "account": acc})
-        doc.save(ignore_permissions=True)
+    if not acc:
+        return
+    # Salary Component Account uses 'default_account' in v16 (older builds: 'account').
+    fld = "default_account" if frappe.get_meta("Salary Component Account").has_field("default_account") else "account"
+    ensure_child(doc, "accounts", ["company"], {"company": company, fld: acc})
+    doc.save(ignore_permissions=True)
 
 
 def _hrms(tbi):
@@ -27,7 +30,14 @@ def _hrms(tbi):
             "set CUSTOM_IMAGE/CUSTOM_TAG/PULL_POLICY in .env, recreate the stack, then re-run. "
             "Or set PAYROLL_BACKEND=journal.")
 
-    # ── Income Tax Slab (annualised Kenya PAYE) ──
+    # ── Income Tax Slab (annualised Kenya PAYE) ── slabs is mandatory before insert.
+    def _slabs(doc):
+        for frm, to, pct in [
+            (0, 288000, 10), (288000, 388000, 25), (388000, 6000000, 30),
+            (6000000, 9600000, 32.5), (9600000, 0, 35),
+        ]:
+            doc.append("slabs", {"from_amount": frm, "to_amount": to, "percent_deduction": pct})
+
     slab = get_or_create(
         "Income Tax Slab", {"name": "Kenya PAYE"},
         {
@@ -36,13 +46,10 @@ def _hrms(tbi):
             # Proxy for the KES 2,400/month personal relief — refine to a tax credit if needed.
             "standard_tax_exemption_amount": S["PAYE_PERSONAL_RELIEF"] * 12,
         },
+        child_setup=_slabs,
     )
     if not slab.get("slabs"):
-        for frm, to, pct in [
-            (0, 288000, 10), (288000, 388000, 25), (388000, 6000000, 30),
-            (6000000, 9600000, 32.5), (9600000, 0, 35),
-        ]:
-            slab.append("slabs", {"from_amount": frm, "to_amount": to, "percent_deduction": pct})
+        _slabs(slab)
         slab.save(ignore_permissions=True)
     if slab.docstatus == 0:
         slab.submit()
@@ -77,24 +84,24 @@ def _hrms(tbi):
         c = get_or_create("Salary Component", {"salary_component": name}, d)
         _map_account(c, tbi, acct)
 
-    # ── Salary Structure ──
+    # ── Salary Structure ── earnings/deductions are mandatory before insert.
+    def _ss_rows(doc):
+        doc.append("earnings", {"salary_component": "Basic", "amount_based_on_formula": 1, "formula": "base"})
+        doc.append("earnings", {"salary_component": "House Rent Allowance", "amount_based_on_formula": 1, "formula": "base * 0.15"})
+        doc.append("earnings", {"salary_component": "Transport Allowance", "amount": 5000})
+        doc.append("deductions", {"salary_component": "PAYE"})
+        doc.append("deductions", {"salary_component": "SHIF", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['SHIF_RATE']}"})
+        doc.append("deductions", {"salary_component": "NSSF", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['NSSF_RATE']}"})
+        doc.append("deductions", {"salary_component": "Housing Levy", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['HOUSING_LEVY_RATE']}"})
+        doc.append("deductions", {"salary_component": "NITA", "amount": S["NITA_AMOUNT"]})
+
     ss = get_or_create(
         "Salary Structure", {"name": "TBI Standard KES"},
         {"company": tbi, "currency": CFG["CURRENCY"], "payroll_frequency": "Monthly",
          "is_active": "Yes"},
+        child_setup=_ss_rows,
     )
     if ss.docstatus == 0:
-        ss.set("earnings", [])
-        ss.set("deductions", [])
-        ss.append("earnings", {"salary_component": "Basic", "amount_based_on_formula": 1, "formula": "base"})
-        ss.append("earnings", {"salary_component": "House Rent Allowance", "amount_based_on_formula": 1, "formula": "base * 0.15"})
-        ss.append("earnings", {"salary_component": "Transport Allowance", "amount": 5000})
-        ss.append("deductions", {"salary_component": "PAYE"})
-        ss.append("deductions", {"salary_component": "SHIF", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['SHIF_RATE']}"})
-        ss.append("deductions", {"salary_component": "NSSF", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['NSSF_RATE']}"})
-        ss.append("deductions", {"salary_component": "Housing Levy", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['HOUSING_LEVY_RATE']}"})
-        ss.append("deductions", {"salary_component": "NITA", "amount": S["NITA_AMOUNT"]})
-        ss.save(ignore_permissions=True)
         ss.submit()
 
     # ── Sample employee + assignment (gated) ──

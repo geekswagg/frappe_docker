@@ -26,7 +26,11 @@ def _ensure_masters(cc, gkt, tbi):
 
 def _sample_timesheet(cc):
     """Best-effort billable timesheet on the CC->TBI project."""
-    project = "CC → TBI Platform Squad"
+    # Projects autoname to PROJ-####, so resolve the docname via project_name.
+    project = frappe.db.get_value("Project", {"project_name": "CC → TBI Platform Squad"}, "name")
+    if not project:
+        log("CC->TBI project not found; skipping sample timesheet")
+        return
     if frappe.db.exists("Timesheet", {"parent_project": project}):
         log("sample timesheet already exists; skipping")
         return

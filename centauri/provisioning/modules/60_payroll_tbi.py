@@ -34,13 +34,21 @@ PAYE_F = f"(PBR - {_R} if PBR > {_R} else 0)"
 
 
 def _hr_settings():
-    """Unblock Employee creation by setting a naming system if none is configured."""
+    """Unblock Employee creation by setting a naming system if none is configured.
+
+    Read the STORED value (not the in-memory default, which masks an unsaved blank),
+    then persist. 'Full Name' avoids any naming-series dependency.
+    """
     try:
+        stored = frappe.db.get_single_value("HR Settings", "emp_created_by")
+        if stored:
+            return
         hs = frappe.get_single("HR Settings")
-        if hs.meta.has_field("emp_created_by") and not hs.get("emp_created_by"):
-            hs.emp_created_by = "Naming Series"
-            hs.save(ignore_permissions=True)
-            log("HR Settings: emp_created_by = Naming Series")
+        hs.emp_created_by = "Full Name"
+        hs.save(ignore_permissions=True)
+        frappe.db.commit()
+        frappe.clear_cache(doctype="HR Settings")
+        log("HR Settings: emp_created_by = Full Name")
     except Exception as e:
         log(f"HR Settings step skipped: {e}")
 

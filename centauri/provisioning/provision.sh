@@ -66,6 +66,10 @@ hrms_prestep() {
   if dc exec -T backend bench --site "$SITE" list-apps 2>/dev/null | grep -qx hrms; then
     log "hrms already installed"
   else
+    # Clear cache first: after syncing hrms doctypes, a stale controller cache can
+    # resolve e.g. "Expense Claim Type" to the wrong module and abort after_install.
+    log "Clearing cache before install"
+    dc exec -T backend bench --site "$SITE" clear-cache || true
     log "Installing hrms (requires the custom image built by build-image.sh)"
     dc exec -T backend bench --site "$SITE" install-app hrms
   fi

@@ -1,26 +1,167 @@
-# 60 — TBI payroll. Two backends, chosen by PAYROLL_BACKEND:
-#   hrms    -> real Income Tax Slab + Salary Components + Salary Structure (+ sample
-#              Employee/Assignment gated by SAMPLE_DATA). Requires the custom image
-#              with the hrms app (provision.sh installs it in the pre-step).
-#   journal -> a best-effort sample monthly Journal Entry that splits a salary into the
-#              statutory liabilities, for environments that can't rebuild the image.
+# 60 — TBI payroll (hrms). Real Kenyan statutory payroll with verifiable formulas.
 #
-# Kenya statutory rates come from CFG["STATUTORY"] (set in provision.env). Exact PAYE
-# bands / NSSF cap are an explicit verify-before-go-live item; the formulas below are a
-# faithful simulation, not tax advice.
+# Employee deductions on the payslip: NSSF (6%, capped at the Tier-II ceiling),
+# SHIF (2.75%, floored at 300), Housing Levy (1.5%), PAYE (monthly bands with the
+# personal-relief credit). PAYE is computed by formula via two statistical helper
+# components so the math stays readable:
+#   Taxable Pay (TP)        = gross_pay - NSSF
+#   PAYE Before Relief (PBR)= monthly band tax on TP
+#   PAYE                    = max(PBR - personal_relief, 0)
+#
+# Employer statutory costs (NITA, employer NSSF/Housing matches) are NOT employee
+# deductions — book them via Journal Entry to the 2300/5120 accounts (out of slip scope).
+#
+# Rates come from CFG["STATUTORY"]; verify against current Kenyan law before go-live.
+# Formulas are evaluated by hrms at salary-slip time, not during provisioning.
 
 S = CFG["STATUTORY"]
+STRUCTURE = "TBI Standard KES"
+
+# ── Statutory formulas (hrms salary-slip expressions) ────────────────────────
+NSSF_F = (f"(gross_pay if gross_pay <= {int(S['NSSF_TIER2_LIMIT'])} "
+          f"else {int(S['NSSF_TIER2_LIMIT'])}) * {S['NSSF_RATE']}")
+SHIF_F = (f"(gross_pay * {S['SHIF_RATE']} if gross_pay * {S['SHIF_RATE']} >= {S['SHIF_MIN']} "
+          f"else {S['SHIF_MIN']})")
+HOUSING_F = f"gross_pay * {S['HOUSING_LEVY_RATE']}"
+TP_F = "gross_pay - NSSF"                      # taxable pay = gross - employee NSSF
+PBR_F = ("(TP*0.10 if TP<=24000 else "
+         "2400+(TP-24000)*0.25 if TP<=32333 else "
+         "4483.25+(TP-32333)*0.30 if TP<=500000 else "
+         "144783.35+(TP-500000)*0.325 if TP<=800000 else "
+         "242283.35+(TP-800000)*0.35)")
+_R = S["PAYE_PERSONAL_RELIEF"]
+PAYE_F = f"(PBR - {_R} if PBR > {_R} else 0)"
 
 
-def _map_account(doc, company, account_name):
-    """Attach a Salary Component -> account mapping if the account exists."""
-    acc = find_account(company, account_name=account_name)
-    if not acc:
+def _hr_settings():
+    """Unblock Employee creation by setting a naming system if none is configured."""
+    try:
+        hs = frappe.get_single("HR Settings")
+        if hs.meta.has_field("emp_created_by") and not hs.get("emp_created_by"):
+            hs.emp_created_by = "Naming Series"
+            hs.save(ignore_permissions=True)
+            log("HR Settings: emp_created_by = Naming Series")
+    except Exception as e:
+        log(f"HR Settings step skipped: {e}")
+
+
+def _component(name, abbr, ctype, account_name=None, tbi=None, **extra):
+    """Idempotently ensure a Salary Component with the exact desired config."""
+    fields = {"type": ctype, "salary_component_abbr": abbr}
+    fields.update(extra)
+    get_or_create("Salary Component", {"salary_component": name}, dict(fields))
+    ensure_value("Salary Component", name, fields)   # enforce config on existing too
+    if account_name and tbi:
+        doc = frappe.get_doc("Salary Component", name)
+        acc = find_account(tbi, account_name=account_name)
+        if acc:
+            fld = ("default_account"
+                   if frappe.get_meta("Salary Component Account").has_field("default_account")
+                   else "account")
+            ensure_child(doc, "accounts", ["company"], {"company": tbi, fld: acc})
+            doc.save(ignore_permissions=True)
+
+
+def _components(tbi):
+    # Earnings
+    _component("Basic", "B", "Earning", "Salaries and Wages", tbi,
+               amount_based_on_formula=1, formula="base", depends_on_payment_days=1)
+    _component("House Rent Allowance", "HRA", "Earning", "Salaries and Wages", tbi,
+               amount_based_on_formula=1, formula="base * 0.15")
+    _component("Transport Allowance", "TA", "Earning", "Salaries and Wages", tbi)
+    # Employee statutory deductions
+    _component("NSSF", "NSSF", "Deduction", "NSSF Payable", tbi,
+               amount_based_on_formula=1, formula=NSSF_F, variable_based_on_taxable_salary=0)
+    # Statistical helpers for PAYE (excluded from totals/net)
+    _component("Taxable Pay", "TP", "Deduction", None, None,
+               amount_based_on_formula=1, formula=TP_F, statistical_component=1)
+    _component("PAYE Before Relief", "PBR", "Deduction", None, None,
+               amount_based_on_formula=1, formula=PBR_F, statistical_component=1)
+    _component("PAYE", "PAYE", "Deduction", "PAYE Payable", tbi,
+               amount_based_on_formula=1, formula=PAYE_F, variable_based_on_taxable_salary=0)
+    _component("SHIF", "SHIF", "Deduction", "SHIF Payable", tbi,
+               amount_based_on_formula=1, formula=SHIF_F)
+    _component("Housing Levy", "HL", "Deduction", "Housing Levy Payable", tbi,
+               amount_based_on_formula=1, formula=HOUSING_F)
+
+
+def _structure(tbi):
+    """(Re)build the salary structure. Order matters: NSSF -> TP -> PBR -> PAYE."""
+    existing = frappe.db.exists("Salary Structure", STRUCTURE)
+    if existing:
+        doc = frappe.get_doc("Salary Structure", STRUCTURE)
+        if any(r.salary_component == "Taxable Pay" for r in doc.get("deductions")):
+            log("Salary Structure already improved; leaving as-is")
+            return
+        # Pre-payroll rebuild (safe while no salary slips reference it).
+        if doc.docstatus == 1:
+            doc.cancel()
+        frappe.delete_doc("Salary Structure", STRUCTURE, force=1, ignore_permissions=True)
+        log("rebuilding Salary Structure with improved statutory formulas")
+
+    def _rows(d):
+        d.append("earnings", {"salary_component": "Basic", "amount_based_on_formula": 1, "formula": "base"})
+        d.append("earnings", {"salary_component": "House Rent Allowance", "amount_based_on_formula": 1, "formula": "base * 0.15"})
+        d.append("earnings", {"salary_component": "Transport Allowance", "amount": 5000})
+        d.append("deductions", {"salary_component": "NSSF", "amount_based_on_formula": 1, "formula": NSSF_F})
+        d.append("deductions", {"salary_component": "Taxable Pay", "amount_based_on_formula": 1, "formula": TP_F, "statistical_component": 1})
+        d.append("deductions", {"salary_component": "PAYE Before Relief", "amount_based_on_formula": 1, "formula": PBR_F, "statistical_component": 1})
+        d.append("deductions", {"salary_component": "PAYE", "amount_based_on_formula": 1, "formula": PAYE_F})
+        d.append("deductions", {"salary_component": "SHIF", "amount_based_on_formula": 1, "formula": SHIF_F})
+        d.append("deductions", {"salary_component": "Housing Levy", "amount_based_on_formula": 1, "formula": HOUSING_F})
+
+    ss = get_or_create("Salary Structure", {"name": STRUCTURE},
+                       {"company": tbi, "currency": CFG["CURRENCY"],
+                        "payroll_frequency": "Monthly", "is_active": "Yes"},
+                       child_setup=_rows)
+    if ss.docstatus == 0:
+        ss.submit()
+
+
+def _drop_old_slab():
+    """PAYE is now formula-based; remove the unused 'Kenya PAYE' Income Tax Slab if present."""
+    name = frappe.db.exists("Income Tax Slab", "Kenya PAYE")
+    if not name:
         return
-    # Salary Component Account uses 'default_account' in v16 (older builds: 'account').
-    fld = "default_account" if frappe.get_meta("Salary Component Account").has_field("default_account") else "account"
-    ensure_child(doc, "accounts", ["company"], {"company": company, fld: acc})
-    doc.save(ignore_permissions=True)
+    try:
+        doc = frappe.get_doc("Income Tax Slab", name)
+        if doc.docstatus == 1:
+            doc.cancel()
+        frappe.delete_doc("Income Tax Slab", name, force=1, ignore_permissions=True)
+        log("removed unused Income Tax Slab 'Kenya PAYE'")
+    except Exception as e:
+        log(f"could not remove old Income Tax Slab (harmless): {e}")
+
+
+def _sample(tbi):
+    """Sample employee + assignment + a computed salary slip to demonstrate the math."""
+    if not frappe.db.exists("Employee", {"employee_name": "Sample TBI Engineer"}):
+        emp = frappe.new_doc("Employee")
+        emp.update({"first_name": "Sample", "last_name": "TBI Engineer", "company": tbi,
+                    "gender": "Male", "date_of_birth": "1995-01-01",
+                    "date_of_joining": "2026-01-01", "status": "Active"})
+        emp.insert(ignore_permissions=True)
+        log(f"created sample Employee: {emp.name}")
+    emp_name = frappe.db.get_value("Employee", {"employee_name": "Sample TBI Engineer"}, "name")
+
+    if not frappe.db.exists("Salary Structure Assignment",
+                            {"employee": emp_name, "salary_structure": STRUCTURE, "docstatus": ["<", 2]}):
+        ssa = frappe.new_doc("Salary Structure Assignment")
+        ssa.update({"employee": emp_name, "salary_structure": STRUCTURE, "company": tbi,
+                    "from_date": "2026-01-01", "base": 150000})
+        ssa.insert(ignore_permissions=True)
+        ssa.submit()
+        log(f"assigned {STRUCTURE} to {emp_name} (base 150,000)")
+
+    if not frappe.db.exists("Salary Slip", {"employee": emp_name, "start_date": "2026-06-01"}):
+        slip = frappe.new_doc("Salary Slip")
+        slip.update({"employee": emp_name, "company": tbi, "start_date": "2026-06-01",
+                     "end_date": "2026-06-30", "payroll_frequency": "Monthly"})
+        slip.insert(ignore_permissions=True)   # triggers full computation
+        if CFG["SAMPLE_DATA"] == "submit":
+            slip.submit()
+        log(f"sample Salary Slip {slip.name}: gross={slip.get('gross_pay')} "
+            f"deductions={slip.get('total_deduction')} net={slip.get('net_pay')} ({CFG['SAMPLE_DATA']})")
 
 
 def _hrms(tbi):
@@ -29,115 +170,17 @@ def _hrms(tbi):
             "hrms app not installed — build the custom image (centauri/scripts/build-image.sh), "
             "set CUSTOM_IMAGE/CUSTOM_TAG/PULL_POLICY in .env, recreate the stack, then re-run. "
             "Or set PAYROLL_BACKEND=journal.")
-
-    # ── Income Tax Slab (annualised Kenya PAYE) ── slabs is mandatory before insert.
-    def _slabs(doc):
-        for frm, to, pct in [
-            (0, 288000, 10), (288000, 388000, 25), (388000, 6000000, 30),
-            (6000000, 9600000, 32.5), (9600000, 0, 35),
-        ]:
-            doc.append("slabs", {"from_amount": frm, "to_amount": to, "percent_deduction": pct})
-
-    slab = get_or_create(
-        "Income Tax Slab", {"name": "Kenya PAYE"},
-        {
-            "company": tbi, "currency": CFG["CURRENCY"], "effective_from": "2026-01-01",
-            "allow_tax_exemption": 1,
-            # Proxy for the KES 2,400/month personal relief — refine to a tax credit if needed.
-            "standard_tax_exemption_amount": S["PAYE_PERSONAL_RELIEF"] * 12,
-        },
-        child_setup=_slabs,
-    )
-    if not slab.get("slabs"):
-        _slabs(slab)
-        slab.save(ignore_permissions=True)
-    if slab.docstatus == 0:
-        slab.submit()
-
-    # ── Salary Components ──
-    earnings = [
-        ("Basic", "B", 1, "base"),
-        ("House Rent Allowance", "HRA", 1, "base * 0.15"),
-        ("Transport Allowance", "TA", 0, None),
-    ]
-    for name, abbr, formula_based, formula in earnings:
-        d = {"type": "Earning", "salary_component_abbr": abbr, "depends_on_payment_days": 1}
-        if formula_based:
-            d.update({"amount_based_on_formula": 1, "formula": formula})
-        c = get_or_create("Salary Component", {"salary_component": name}, d)
-        _map_account(c, tbi, "Salaries and Wages")
-
-    deductions = [
-        ("PAYE", "PAYE", None, "PAYE Payable", {"variable_based_on_taxable_salary": 1}),
-        ("SHIF", "SHIF", f"gross_pay * {S['SHIF_RATE']}", "SHIF Payable", {}),
-        ("NSSF", "NSSF", f"gross_pay * {S['NSSF_RATE']}", "NSSF Payable", {}),
-        ("Housing Levy", "HL", f"gross_pay * {S['HOUSING_LEVY_RATE']}", "Housing Levy Payable", {}),
-        ("NITA", "NITA", None, "NITA Payable", {}),
-    ]
-    for name, abbr, formula, acct, extra in deductions:
-        d = {"type": "Deduction", "salary_component_abbr": abbr}
-        if formula:
-            d.update({"amount_based_on_formula": 1, "formula": formula})
-        if name == "NITA":
-            d["amount"] = S["NITA_AMOUNT"]
-        d.update(extra)
-        c = get_or_create("Salary Component", {"salary_component": name}, d)
-        _map_account(c, tbi, acct)
-
-    # ── Salary Structure ── earnings/deductions are mandatory before insert.
-    def _ss_rows(doc):
-        doc.append("earnings", {"salary_component": "Basic", "amount_based_on_formula": 1, "formula": "base"})
-        doc.append("earnings", {"salary_component": "House Rent Allowance", "amount_based_on_formula": 1, "formula": "base * 0.15"})
-        doc.append("earnings", {"salary_component": "Transport Allowance", "amount": 5000})
-        doc.append("deductions", {"salary_component": "PAYE"})
-        doc.append("deductions", {"salary_component": "SHIF", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['SHIF_RATE']}"})
-        doc.append("deductions", {"salary_component": "NSSF", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['NSSF_RATE']}"})
-        doc.append("deductions", {"salary_component": "Housing Levy", "amount_based_on_formula": 1, "formula": f"gross_pay * {S['HOUSING_LEVY_RATE']}"})
-        doc.append("deductions", {"salary_component": "NITA", "amount": S["NITA_AMOUNT"]})
-
-    ss = get_or_create(
-        "Salary Structure", {"name": "TBI Standard KES"},
-        {"company": tbi, "currency": CFG["CURRENCY"], "payroll_frequency": "Monthly",
-         "is_active": "Yes"},
-        child_setup=_ss_rows,
-    )
-    if ss.docstatus == 0:
-        ss.submit()
-
-    # ── Sample employee + assignment (gated) ──
+    _hr_settings()
+    _drop_old_slab()
+    _components(tbi)
+    _structure(tbi)
     if CFG["SAMPLE_DATA"] in ("draft", "submit"):
         try:
-            _sample_employee_assignment(tbi)
+            _sample(tbi)
         except Exception as e:
             log(f"sample payroll skipped: {e}")
     else:
-        log("SAMPLE_DATA=masters — skipping sample employee/assignment")
-
-
-def _sample_employee_assignment(tbi):
-    if not frappe.db.exists("Employee", {"employee_name": "Sample TBI Engineer"}):
-        emp = frappe.new_doc("Employee")
-        emp.update({
-            "first_name": "Sample", "last_name": "TBI Engineer",
-            "company": tbi, "gender": "Other",
-            "date_of_birth": "1995-01-01", "date_of_joining": "2026-01-01",
-            "status": "Active",
-        })
-        emp.insert(ignore_permissions=True)
-        log(f"created sample Employee: {emp.name}")
-    emp_name = frappe.db.get_value("Employee", {"employee_name": "Sample TBI Engineer"}, "name")
-
-    if not frappe.db.exists("Salary Structure Assignment",
-                            {"employee": emp_name, "salary_structure": "TBI Standard KES"}):
-        ssa = frappe.new_doc("Salary Structure Assignment")
-        ssa.update({
-            "employee": emp_name, "salary_structure": "TBI Standard KES",
-            "company": tbi, "from_date": "2026-01-01", "base": 150000,
-            "income_tax_slab": "Kenya PAYE",
-        })
-        ssa.insert(ignore_permissions=True)
-        ssa.submit()  # no GL impact; required to run payroll
-        log(f"created Salary Structure Assignment for {emp_name}")
+        log("SAMPLE_DATA=masters — skipping sample employee/slip")
 
 
 def _journal(tbi):
@@ -147,11 +190,22 @@ def _journal(tbi):
         log("sample payroll JE already exists; skipping")
         return
     gross = 150000.0
-    shif = round(gross * S["SHIF_RATE"], 2)
-    nssf = round(gross * S["NSSF_RATE"], 2)
+    nssf = round(min(gross, S["NSSF_TIER2_LIMIT"]) * S["NSSF_RATE"], 2)
+    shif = round(max(gross * S["SHIF_RATE"], S["SHIF_MIN"]), 2)
     housing = round(gross * S["HOUSING_LEVY_RATE"], 2)
-    paye = round(gross * 0.25, 2)  # rough proxy; refine with real bands
-    net = round(gross - shif - nssf - housing - paye, 2)
+    tp = gross - nssf
+    if tp <= 24000:
+        pbr = tp * 0.10
+    elif tp <= 32333:
+        pbr = 2400 + (tp - 24000) * 0.25
+    elif tp <= 500000:
+        pbr = 4483.25 + (tp - 32333) * 0.30
+    elif tp <= 800000:
+        pbr = 144783.35 + (tp - 500000) * 0.325
+    else:
+        pbr = 242283.35 + (tp - 800000) * 0.35
+    paye = round(max(pbr - S["PAYE_PERSONAL_RELIEF"], 0), 2)
+    net = round(gross - nssf - shif - housing - paye, 2)
 
     def acc(name):
         return find_account(tbi, account_name=name)
@@ -167,11 +221,11 @@ def _journal(tbi):
     for liab, amt in [("PAYE Payable", paye), ("SHIF Payable", shif),
                       ("NSSF Payable", nssf), ("Housing Levy Payable", housing)]:
         je.append("accounts", {"account": acc(liab), "credit_in_account_currency": amt})
-    # Net pay credited to the default payable/bank-clearing — use Creditors if present.
     net_acc = acc("Creditors") or acc("Accounts Payable")
     je.append("accounts", {"account": net_acc, "credit_in_account_currency": net})
     je.insert(ignore_permissions=True)
-    log(f"created sample payroll Journal Entry (draft): {je.name}")
+    log(f"created sample payroll Journal Entry (draft): {je.name} "
+        f"(gross={gross} paye={paye} nssf={nssf} shif={shif} housing={housing} net={net})")
 
 
 def _main():

@@ -129,6 +129,21 @@ def _structure(tbi):
         ss.submit()
 
 
+def _ensure_holiday_list(tbi):
+    """A Holiday List is required to compute a Salary Slip; create one (weekly off
+    Sunday) and set it as the company default so payslips can be generated."""
+    def _weekly(doc):
+        try:
+            doc.get_weekly_off_dates()
+        except Exception:
+            pass
+    get_or_create("Holiday List", {"holiday_list_name": "Kenya 2026"},
+                  {"from_date": "2026-01-01", "to_date": "2026-12-31", "weekly_off": "Sunday"},
+                  child_setup=_weekly)
+    if frappe.get_meta("Company").has_field("default_holiday_list"):
+        ensure_value("Company", tbi, {"default_holiday_list": "Kenya 2026"})
+
+
 def _drop_old_slab():
     """PAYE is now formula-based; remove the unused 'Kenya PAYE' Income Tax Slab if present."""
     name = frappe.db.exists("Income Tax Slab", "Kenya PAYE")
@@ -155,6 +170,8 @@ def _sample(tbi):
         emp.insert(ignore_permissions=True)
         log(f"created sample Employee: {emp.name}")
     emp_name = frappe.db.get_value("Employee", {"employee_name": "Sample TBI Engineer"}, "name")
+    if frappe.get_meta("Employee").has_field("holiday_list"):
+        ensure_value("Employee", emp_name, {"holiday_list": "Kenya 2026"})
 
     if not frappe.db.exists("Salary Structure Assignment",
                             {"employee": emp_name, "salary_structure": STRUCTURE, "docstatus": ["<", 2]}):
@@ -186,6 +203,7 @@ def _hrms(tbi):
     _drop_old_slab()
     _components(tbi)
     _structure(tbi)
+    _ensure_holiday_list(tbi)
     if CFG["SAMPLE_DATA"] in ("draft", "submit"):
         try:
             _sample(tbi)

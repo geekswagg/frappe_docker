@@ -22,8 +22,10 @@
 6. [Phase 3 — Azure Failover Environment](#6-phase-3--azure-failover-environment)
 7. [Phase 4 — Data Replication Strategy](#7-phase-4--data-replication-strategy)
 8. [Phase 5 — Failover Automation](#8-phase-5--failover-automation)
-9. [Phase 6 — API Configuration for Integrations](#9-phase-6--api-configuration-for-integrations)
-10. [Phase 7 — Backup & Recovery](#10-phase-7--backup--recovery)
+9. [Phase 6 — Omwenga Holdings Group Company Setup](#9-phase-6--omwenga-holdings-group-company-setup)
+    - [Phase 6.5 — Programmatic Group Provisioning (code-as-config)](#95-phase-65--programmatic-group-provisioning-code-as-config)
+10. [Phase 7 — API Configuration for Integrations](#10-phase-7--api-configuration-for-integrations)
+11. [Phase 8 — Backup & Recovery](#11-phase-8--backup--recovery)
 11. [Day-2 Operations](#11-day-2-operations)
 12. [Upgrade Path](#12-upgrade-path)
 
@@ -269,6 +271,31 @@ cp centauri/config/centauri.env.template .env
 # Edit .env — fill in DB_PASSWORD, LETSENCRYPT_EMAIL, SITES_RULE
 nano .env
 ```
+
+### 3.6b Build the Custom Image (ERPNext + HRMS)
+
+Payroll lives in the separate **hrms** app, which the official `frappe/erpnext` image does
+not contain. Build a custom image that bundles it (one-time; rebuild only when the app list
+in `apps.json` changes). Runtime `bench get-app` is unsupported and lost on container
+recreation — the app must be baked into the image.
+
+```bash
+cd /opt/centauri/frappe_docker
+bash centauri/scripts/build-image.sh        # builds comwenga/erpnext-hrms:v16 from apps.json
+```
+
+The image reference is already set in `centauri.env.template` (so it is in your `.env`):
+
+```dotenv
+CUSTOM_IMAGE=comwenga/erpnext-hrms
+CUSTOM_TAG=v16
+PULL_POLICY=missing
+```
+
+> Requires Docker Engine v23+ (BuildKit) for the `--secret` apps.json mount. **Failover
+> parity:** build (or pull) the same image on the Azure failover VM, or a promoted failover
+> boots without hrms and breaks payroll. To skip payroll for now, leave these commented and
+> set `PAYROLL_BACKEND=journal` in the provisioning config (Phase 6.5).
 
 ### 3.7 Launch the Stack
 
@@ -1160,7 +1187,7 @@ Create companies in this exact order (parent must exist before children):
 |---|---|---|---|---|---|
 | 1 | Omwenga Holdings | OHL | ✅ Yes | *(none)* | KES |
 | 2 | Centauri Consulting | CC | ☐ No | Omwenga Holdings | KES |
-| 3 | Giktek | GKT | ☐ No | Omwenga Holdings | KES |
+| 3 | Giktek Ventures | GKT | ☐ No | Omwenga Holdings | KES |
 | 4 | Techno Brain Incubator | TBI | ☐ No | Omwenga Holdings | KES |
 
 > **Abbreviation matters** — it prefixes all auto-generated account codes and document series.
@@ -1236,6 +1263,54 @@ Each subsidiary will send email under its own domain. In ERPNext:
 
 Set each account's **Default Company** so outbound emails automatically use the correct
 sender when documents are sent from that company.
+
+---
+
+## 9.5 Phase 6.5 — Programmatic Group Provisioning (code-as-config)
+
+Sections 9.2–9.3 describe the group structure as manual UI steps. In practice that
+configuration is applied — and kept reproducible — by the **idempotent provisioning
+toolkit** in `centauri/provisioning/`, so the entire group setup survives a database
+teardown and rebuilds with one command. The toolkit reflects the *actual* values in use
+(Giktek **Ventures**; **Standard with Numbers** chart of accounts) and supersedes the
+hand-clicked steps above.
+
+### What it provisions
+
+Eleven ordered modules: fiscal years → companies → statutory/intercompany/payroll accounts
+→ inter-company customers & suppliers → item groups & price lists → Microsoft catalog → IP
+products → secondment (Timesheet → intercompany Sales Invoice) → TBI payroll (hrms) →
+accounting dimensions → API integration users. Full detail in
+`centauri/provisioning/README.md`.
+
+### How it runs
+
+Each module is streamed through the Frappe ORM inside the backend container and succeeds
+only if it prints `PROVISION_OK <name>` (the orchestrator treats its absence as failure,
+because `bench console` does not reliably exit non-zero on a Python error):
+
+```bash
+cd /opt/centauri/frappe_docker/centauri/provisioning
+cp provision.env.template provision.env      # tune rates / usernames / SAMPLE_DATA
+./provision.sh --dry-run                      # preview the ordered plan
+./provision.sh                                # apply (idempotent — safe to re-run)
+```
+
+The run is **idempotent**: existence-checked inserts, change-only updates, and sample
+transactions guarded by deterministic keys. Re-running creates nothing new — that is the
+teardown-survival guarantee, and the reason this replaces click-ops.
+
+### Payroll requires the custom HRMS image
+
+`PAYROLL_BACKEND=hrms` (default) needs the hrms app from the custom image built in Phase 1,
+step 3.6b; `provision.sh` then runs `install-app hrms` + `migrate` automatically. To defer
+payroll without rebuilding the image, set `PAYROLL_BACKEND=journal`.
+
+### API keys
+
+`80_integration_users` prints `APIKEY <user> <key>:<secret>` lines (the secret is shown
+once). Store them in Azure Key Vault — they are the credentials your Microsoft/GTM
+integrations use against the REST API documented next in Phase 7.
 
 ---
 

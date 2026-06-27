@@ -1,6 +1,10 @@
 # Environment Variables
 .env
 
+# Centauri provisioning — local config and generated API secrets
+centauri/provisioning/provision.env
+centauri/provisioning/.secrets/
+
 # mounted volume
 sites
 

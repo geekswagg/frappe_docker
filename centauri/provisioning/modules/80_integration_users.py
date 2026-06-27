@@ -37,33 +37,18 @@ def _ensure_keys(email):
 
 
 def _enable_cors():
+    # frappe.conf.allow_cors accepts "*" or a LIST of origins. Support both, and a
+    # comma-separated ALLOW_CORS_ORIGIN. NOTE: site_config is read at worker startup,
+    # so the backend must be restarted for this to take effect.
     try:
         from frappe.installer import update_site_config
-        update_site_config("allow_cors", CFG["ALLOW_CORS_ORIGIN"])
-        log(f"CORS allow_cors set to {CFG['ALLOW_CORS_ORIGIN']}")
+        raw = (CFG["ALLOW_CORS_ORIGIN"] or "").strip()
+        value = "*" if raw == "*" else [o.strip() for o in raw.split(",") if o.strip()]
+        update_site_config("allow_cors", value)
+        log(f"CORS allow_cors = {value} — restart backend to apply "
+            "(docker compose -p centauri restart backend)")
     except Exception as e:
         log(f"CORS config skipped: {e}")
-
-
-def _sample_webhook():
-    try:
-        if frappe.db.exists("Webhook", {"webhook_doctype": "Sales Invoice",
-                                        "webhook_docevent": "on_submit"}):
-            log("sample webhook already exists; skipping")
-            return
-        wh = frappe.new_doc("Webhook")
-        wh.update({
-            "webhook_doctype": "Sales Invoice",
-            "webhook_docevent": "on_submit",
-            "request_url": "https://integrations.comwenga.com/webhooks/erpnext",
-            "request_method": "POST",
-            "request_structure": "JSON",
-            "enabled": 0,  # disabled — enable once the receiver exists
-        })
-        wh.insert(ignore_permissions=True)
-        log("created disabled sample Webhook (Sales Invoice on_submit)")
-    except Exception as e:
-        log(f"sample webhook skipped: {e}")
 
 
 def _main():
@@ -72,7 +57,8 @@ def _main():
         _ensure_user(email, first, last, roles)
         _ensure_keys(email)
     _enable_cors()
-    _sample_webhook()
+    log("Webhooks: configure per integration in the UI (Settings > Webhook) "
+        "once you have a receiver URL.")
 
 
 run_module(_main, "80_integration_users")

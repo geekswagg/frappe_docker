@@ -149,6 +149,7 @@ def _sample(tbi):
     if not frappe.db.exists("Employee", {"employee_name": "Sample TBI Engineer"}):
         emp = frappe.new_doc("Employee")
         emp.update({"first_name": "Sample", "last_name": "TBI Engineer", "company": tbi,
+                    "employee_number": "TBI-001",
                     "gender": "Male", "date_of_birth": "1995-01-01",
                     "date_of_joining": "2026-01-01", "status": "Active"})
         emp.insert(ignore_permissions=True)

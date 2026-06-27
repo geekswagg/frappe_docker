@@ -159,28 +159,89 @@ def _drop_old_slab():
         log(f"could not remove old Income Tax Slab (harmless): {e}")
 
 
+def _compute(base):
+    """Formula-derived monthly breakdown for a given base — mirrors the structure."""
+    gross = base + base * 0.15 + 5000.0          # Basic + HRA(15%) + Transport(5000)
+    nssf = round(min(gross, S["NSSF_TIER2_LIMIT"]) * S["NSSF_RATE"], 2)
+    shif = round(max(gross * S["SHIF_RATE"], S["SHIF_MIN"]), 2)
+    housing = round(gross * S["HOUSING_LEVY_RATE"], 2)
+    tp = gross - nssf
+    if tp <= 24000:
+        pbr = tp * 0.10
+    elif tp <= 32333:
+        pbr = 2400 + (tp - 24000) * 0.25
+    elif tp <= 500000:
+        pbr = 4483.25 + (tp - 32333) * 0.30
+    elif tp <= 800000:
+        pbr = 144783.35 + (tp - 500000) * 0.325
+    else:
+        pbr = 242283.35 + (tp - 800000) * 0.35
+    paye = round(max(pbr - S["PAYE_PERSONAL_RELIEF"], 0), 2)
+    ded = round(nssf + shif + housing + paye, 2)
+    return {"gross": round(gross, 2), "nssf": nssf, "shif": shif, "housing": housing,
+            "paye": paye, "deductions": ded, "net": round(gross - ded, 2)}
+
+
+def _assign_holiday_list(tbi, emp_name):
+    """Newer hrms resolves holidays via a 'Holiday List Assignment' doctype. Create one
+    schema-adaptively (only setting fields that exist) so the live slip can compute."""
+    if not frappe.db.exists("DocType", "Holiday List Assignment"):
+        return
+    try:
+        if frappe.db.exists("Holiday List Assignment", {"holiday_list": "Kenya 2026"}):
+            return
+        meta = frappe.get_meta("Holiday List Assignment")
+
+        def setf(f, v):
+            if meta.has_field(f):
+                doc.set(f, v)
+
+        doc = frappe.new_doc("Holiday List Assignment")
+        setf("holiday_list", "Kenya 2026")
+        setf("company", tbi)
+        setf("employee", emp_name)
+        setf("applicable_for", "Company")
+        for f in ("from_date", "applicable_from", "effective_from", "start_date", "date"):
+            setf(f, "2026-01-01")
+        doc.insert(ignore_permissions=True)
+        if meta.is_submittable:
+            doc.submit()
+        log("created Holiday List Assignment (Kenya 2026)")
+    except Exception as e:
+        log(f"holiday list assignment skipped: {e}")
+
+
 def _sample(tbi):
     """Sample employee + assignment + a computed salary slip to demonstrate the math."""
+    base = 150000
+    b = _compute(base)
+    log(f"expected payslip (base {base:,}): gross={b['gross']} NSSF={b['nssf']} "
+        f"SHIF={b['shif']} Housing={b['housing']} PAYE={b['paye']} "
+        f"deductions={b['deductions']} net={b['net']}")
+
     if not frappe.db.exists("Employee", {"employee_name": "Sample TBI Engineer"}):
         emp = frappe.new_doc("Employee")
         emp.update({"first_name": "Sample", "last_name": "TBI Engineer", "company": tbi,
-                    "employee_number": "TBI-001",
-                    "gender": "Male", "date_of_birth": "1995-01-01",
-                    "date_of_joining": "2026-01-01", "status": "Active"})
+                    "employee_number": "TBI-001", "gender": "Male",
+                    "date_of_birth": "1995-01-01", "date_of_joining": "2026-01-01",
+                    "status": "Active", "holiday_list": "Kenya 2026"})
         emp.insert(ignore_permissions=True)
         log(f"created sample Employee: {emp.name}")
     emp_name = frappe.db.get_value("Employee", {"employee_name": "Sample TBI Engineer"}, "name")
     if frappe.get_meta("Employee").has_field("holiday_list"):
         ensure_value("Employee", emp_name, {"holiday_list": "Kenya 2026"})
+    frappe.clear_document_cache("Employee", emp_name)
+    frappe.clear_document_cache("Company", tbi)
+    _assign_holiday_list(tbi, emp_name)
 
     if not frappe.db.exists("Salary Structure Assignment",
                             {"employee": emp_name, "salary_structure": STRUCTURE, "docstatus": ["<", 2]}):
         ssa = frappe.new_doc("Salary Structure Assignment")
         ssa.update({"employee": emp_name, "salary_structure": STRUCTURE, "company": tbi,
-                    "from_date": "2026-01-01", "base": 150000})
+                    "from_date": "2026-01-01", "base": base})
         ssa.insert(ignore_permissions=True)
         ssa.submit()
-        log(f"assigned {STRUCTURE} to {emp_name} (base 150,000)")
+        log(f"assigned {STRUCTURE} to {emp_name} (base {base:,})")
 
     if not frappe.db.exists("Salary Slip", {"employee": emp_name, "start_date": "2026-06-01"}):
         slip = frappe.new_doc("Salary Slip")
